@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $env:PYTHONUNBUFFERED = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONPATH = $App
+$env:PSTUDIO_ROOT = $Root
 $userFal = [Environment]::GetEnvironmentVariable('FAL_KEY', 'User')
 if ($userFal) { $env:FAL_KEY = $userFal }
 
@@ -49,6 +50,7 @@ function Pick-File([string]$filter = 'All files|*.*', [string]$dir = $Work) {
 $Framings = [ordered]@{
     'Auto' = 'auto'; 'Stacked' = 'stack'; 'Side by side' = 'side'; 'Both in frame' = 'wide'
     'One person' = 'single'; 'Left person' = 'single-left'; 'Right person' = 'single-right'
+    'Active speaker' = 'speaker'
 }
 function Get-FramingLabel([string]$value) {
     foreach ($k in $Framings.Keys) { if ($Framings[$k] -eq $value) { return $k } }
@@ -188,7 +190,7 @@ $btnClaude.Add_Click({
 })
 
 # ================================================================ TAB 0: Create (prompt -> outline -> video, all local)
-$t0 = New-Tab 'Create (prompt to video)'
+$t0 = New-Tab 'Create'
 Add-Label $t0 'Project name' 10 12 | Out-Null
 $cName = Add-Text $t0 150 12 170 'my-video'
 Add-Label $t0 'Length (s)' 335 12 70 | Out-Null
@@ -196,7 +198,19 @@ $cSecs = Add-Text $t0 405 12 45 '45'
 Add-Label $t0 'Format' 465 12 50 | Out-Null
 $cFmt = Add-Combo $t0 515 12 70 @('9:16', '16:9', '1:1')
 Add-Label $t0 'Local model' 600 12 80 | Out-Null
-$cModel = Add-Combo $t0 685 12 225 @('gemma3:4b', 'qwen3:4b', 'phi4-mini', 'llama3.2:3b') $true
+$cModel = Add-Combo $t0 685 12 120 @('gemma3:4b', 'phi4-mini', 'qwen3:4b', 'llama3.2:3b') $true
+$cLip = New-Object System.Windows.Forms.CheckBox
+$cLip.Text = 'Lip-sync'; $cLip.Location = New-Object System.Drawing.Point(815, 12); $cLip.Size = New-Object System.Drawing.Size(95, 24)
+$t0.Controls.Add($cLip)
+function Load-DefaultModel {
+    $f = Join-Path $Work 'settings.json'
+    if (-not (Test-Path $f)) { return }
+    try {
+        $m = ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json).model
+        if ($m) { $cModel.Text = [string]$m }
+    } catch { }
+}
+Load-DefaultModel
 Add-Label $t0 'Video topic / prompt' 10 47 | Out-Null
 $cPrompt = Add-Text $t0 150 47 760 '' 50
 Add-Label $t0 'Voice sample WAV' 10 107 | Out-Null
@@ -227,6 +241,7 @@ function Get-ProjectArgs([string]$dir, [string]$stage) {
     $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
         '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
         '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }),
+        '--lipsync', $(if ($cLip.Checked) { 'on' } else { 'off' }),
         '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }),
         '--framing', $Framings[[string]$cFrame.SelectedItem])
     if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
@@ -372,7 +387,7 @@ function Show-BrandKit([string]$path = '') {
 }
 
 # ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
-$tS = New-Tab 'Scenes (edit)'
+$tS = New-Tab 'Scenes'
 $script:sceneData = @()
 $b = Add-Button $tS 'Load scenes' 10 10 120
 $b.Add_Click({ Load-Scenes $false })
@@ -488,8 +503,153 @@ $nS = Add-Label $tS ('Save scene stores your edit; press "Apply changes" to rebu
     '"Re-make this scene" gives a new voice take and the next best footage. Framing applies to footage and soundbites.') 365 378 545
 $nS.Size = New-Object System.Drawing.Size(545, 62)
 
+# ================================================================ TAB: Highlights (best moments of an episode -> clips)
+$tH = New-Tab 'Highlights'
+$script:hlClips = @()
+Add-Label $tH 'Episode video' 10 12 | Out-Null
+$hEp = Add-Text $tH 150 12 640
+$b = Add-Button $tH 'Browse...' 800 10 110; $b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $hEp.Text = $f } })
+Add-Label $tH 'Clips to make' 10 47 | Out-Null
+$hCount = Add-Text $tH 150 47 40 '5'
+Add-Label $tH 'Shortest (s)' 205 47 85 | Out-Null
+$hMin = Add-Text $tH 292 47 40 '20'
+Add-Label $tH 'Longest (s)' 345 47 80 | Out-Null
+$hMax = Add-Text $tH 428 47 40 '45'
+Add-Label $tH 'Shape' 480 47 45 | Out-Null
+$hFmt = Add-Combo $tH 528 47 70 @('9:16', '16:9', '1:1')
+Add-Label $tH 'Framing' 610 47 55 | Out-Null
+$hFrame = Add-Combo $tH 668 47 132 @($Framings.Keys)
+$hFrame.SelectedItem = 'Active speaker'
+$hTitle = New-Object System.Windows.Forms.CheckBox
+$hTitle.Text = 'Headline'; $hTitle.Checked = $true
+$hTitle.Location = New-Object System.Drawing.Point(812, 47); $hTitle.Size = New-Object System.Drawing.Size(98, 24)
+$tH.Controls.Add($hTitle)
+$hList = New-Object System.Windows.Forms.ListBox
+$hList.Location = New-Object System.Drawing.Point(10, 125); $hList.Size = New-Object System.Drawing.Size(900, 250)
+$hList.HorizontalScrollbar = $true; $hList.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tH.Controls.Add($hList)
+
+function Get-HighlightsDir {
+    if (-not $hEp.Text) { return $null }
+    $stem = ([System.IO.Path]::GetFileNameWithoutExtension($hEp.Text) -replace '[^\w\-]+', '-').Trim('-')
+    return (Join-Path $Work "highlights\$stem")
+}
+function Load-Highlights {
+    $hList.Items.Clear(); $script:hlClips = @()
+    $dir = Get-HighlightsDir
+    if (-not $dir) { return }
+    $file = Join-Path $dir 'highlights.json'
+    if (-not (Test-Path $file)) { return }
+    try { $doc = [System.IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { return }
+    foreach ($c in @($doc.clips)) {
+        $script:hlClips += [string]$c.file
+        [void]$hList.Items.Add(('{0,3}  {1,5:N1}s  {2,-8} {3}  |  {4}' -f $c.score, $c.seconds, $c.framing, $c.title, $c.text))
+    }
+}
+$b = Add-Button $tH 'Find highlights + make clips' 150 85 230
+$b.Add_Click({
+    if (-not (Test-Path $hEp.Text)) { Msg 'Choose an episode video that has been indexed (Create tab > Index footage).'; return }
+    $argv = @('--lib', (Join-Path $Work 'library'), '--episode', $hEp.Text, '--out', (Join-Path $Work 'highlights'),
+        '--count', $hCount.Text, '--min', $hMin.Text, '--max', $hMax.Text, '--format', $hFmt.Text,
+        '--framing', $Framings[[string]$hFrame.SelectedItem], '--model', $cModel.Text)
+    if (-not $hTitle.Checked) { $argv += '--no-title' }
+    Run-Py 'Find highlights and make clips' 'highlights.py' $argv { Load-Highlights }
+})
+$b = Add-Button $tH 'Show clips' 390 85 110
+$b.Add_Click({ Load-Highlights; if ($hList.Items.Count -eq 0) { Msg 'No clips have been made for this episode yet.' } })
+$b = Add-Button $tH 'Play selected' 510 85 120
+$b.Add_Click({
+    $i = $hList.SelectedIndex
+    if ($i -ge 0 -and $i -lt $script:hlClips.Count -and (Test-Path $script:hlClips[$i])) { Start-Process $script:hlClips[$i] }
+})
+$b = Add-Button $tH 'Open clips folder' 640 85 150
+$b.Add_Click({ $d = Get-HighlightsDir; if ($d -and (Test-Path $d)) { Start-Process explorer.exe $d } })
+$nH = Add-Label $tH ('Finds the strongest moments in one episode and cuts each into a finished clip with the hosts'' own sound, captions and a headline. ' +
+    'The episode must be in the footage index. "Active speaker" cuts to whoever is talking when two hosts are on screen.') 10 385 900
+$nH.Size = New-Object System.Drawing.Size(900, 50)
+
+# ================================================================ TAB: Publish (title, description, YouTube upload)
+$tP = New-Tab 'Publish'
+$b = Add-Button $tP 'Load' 10 10 100
+$b.Add_Click({ Load-Publish $false })
+$pInfo = Add-Label $tP 'Publishes the project named in the Create tab.' 120 10 780
+Add-Label $tP 'Title' 10 47 | Out-Null
+$pTitle = Add-Text $tP 150 47 760
+Add-Label $tP 'Description' 10 82 | Out-Null
+$pDesc = Add-Text $tP 150 82 760 '' 120
+Add-Label $tP 'Tags (commas)' 10 210 | Out-Null
+$pTags = Add-Text $tP 150 210 760
+Add-Label $tP 'Privacy' 10 245 | Out-Null
+$pPrivacy = Add-Combo $tP 150 245 120 @('private', 'unlisted', 'public')
+Add-Label $tP 'Schedule' 285 245 65 | Out-Null
+$pWhen = Add-Text $tP 352 245 150
+Add-Label $tP 'optional, e.g. 2026-12-01 09:30 (private only)' 510 245 400 | Out-Null
+$script:pubUrl = ''
+
+function Get-PublishFile { $dir = Get-Project; if (-not $dir) { return $null }; return (Join-Path $dir 'publish.json') }
+function Load-Publish([bool]$quiet) {
+    $file = Get-PublishFile; if (-not $file) { return }
+    $script:pubUrl = ''
+    $pInfo.Text = "Project: $(Split-Path (Split-Path $file -Parent) -Leaf)"
+    if (-not (Test-Path $file)) {
+        if (-not $quiet) { Msg 'Nothing saved yet. Press "Write title + description" or type your own and press Save.' }
+        return
+    }
+    try { $doc = [System.IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { Msg "Could not read $file"; return }
+    $pTitle.Text = [string]$doc.title
+    $pDesc.Text = ([string]$doc.description -replace "`r?`n", "`r`n")
+    $pTags.Text = [string]$doc.tags
+    $pWhen.Text = [string]$doc.publish_at
+    if ($pPrivacy.Items.Contains([string]$doc.privacy)) { $pPrivacy.SelectedItem = [string]$doc.privacy }
+    if ($doc.url) { $script:pubUrl = [string]$doc.url; $pInfo.Text += "   |   uploaded: $($doc.url)" }
+}
+function Save-Publish {
+    $file = Get-PublishFile; if (-not $file) { return $false }
+    $out = [ordered]@{}
+    if (Test-Path $file) {
+        try { foreach ($p in ([System.IO.File]::ReadAllText($file) | ConvertFrom-Json).PSObject.Properties) { $out[$p.Name] = $p.Value } } catch { }
+    }
+    $out['title'] = $pTitle.Text.Trim()
+    $out['description'] = ($pDesc.Text -replace "`r`n", "`n")
+    $out['tags'] = $pTags.Text.Trim()
+    $out['privacy'] = [string]$pPrivacy.SelectedItem
+    $out['publish_at'] = $pWhen.Text.Trim()
+    [System.IO.File]::WriteAllText($file, ($out | ConvertTo-Json))
+    return $true
+}
+$b = Add-Button $tP 'Write title + description (local)' 150 285 240
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py 'Write title and description (local model)' 'publish.py' @('pack', '--project', $dir, '--model', $cModel.Text) { Load-Publish $true }
+})
+$b = Add-Button $tP 'Save' 400 285 80
+$b.Add_Click({ if (Save-Publish) { Log 'Publish details saved.' } })
+$b = Add-Button $tP 'YouTube sign-in file...' 490 285 170
+$b.Add_Click({
+    $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
+    if ($f) { Copy-Item $f (Join-Path $Work 'youtube_client_secret.json') -Force; Log 'YouTube sign-in file saved in the workspace.' }
+})
+$b = Add-Button $tP 'Upload to YouTube' 670 285 150
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    if (-not (Test-Path (Join-Path $dir 'final.mp4'))) { Msg 'This project has no finished video yet.'; return }
+    if (-not $pTitle.Text.Trim()) { Msg 'Add a title first.'; return }
+    if (-not (Test-Path (Join-Path $Work 'youtube_client_secret.json'))) { Msg 'Choose your YouTube sign-in file first (see the steps below).'; return }
+    $what = "Upload ""$($pTitle.Text.Trim())"" to YouTube as $($pPrivacy.SelectedItem)?"
+    if ($pWhen.Text.Trim()) { $what += " It will go public at $($pWhen.Text.Trim())." }
+    if ([System.Windows.Forms.MessageBox]::Show($what, 'Podcast Studio', 'YesNo') -ne 'Yes') { return }
+    if (-not (Save-Publish)) { return }
+    Run-Py 'Upload to YouTube' 'publish.py' @('upload', '--project', $dir) { Load-Publish $true }
+})
+$b = Add-Button $tP 'Open' 830 285 80
+$b.Add_Click({ if ($script:pubUrl) { Start-Process $script:pubUrl } else { Msg 'This project has not been uploaded yet.' } })
+$nP = Add-Label $tP ('Nothing leaves this PC until you press Upload and confirm. Videos upload as private unless you change Privacy. ' +
+    'One-time setup: in Google Cloud Console create a project, enable "YouTube Data API v3", create an OAuth client of type "Desktop app", ' +
+    'download its JSON file and choose it with "YouTube sign-in file...". The first upload opens your browser to sign in.') 150 330 760
+$nP.Size = New-Object System.Drawing.Size(760, 80)
+
 # ================================================================ TAB 1: Analyze
-$t1 = New-Tab '1 - Analyze'
+$t1 = New-Tab 'Analyze'
 Add-Label $t1 'YouTube URL or file' 10 15 | Out-Null
 $aSrc = Add-Text $t1 150 15 640
 $b = Add-Button $t1 'Browse...' 800 13 110; $b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $aSrc.Text = $f } })
@@ -526,6 +686,10 @@ $b.Add_Click({
         Run-Py 'Transcribe' 'captions.py' @($src, '--model', $aWhisper.Text, '--out', (Join-Path $Work "analysis\$name"))
     }
 })
+$b = Add-Button $t1 'Compare local models' 730 140 180
+$b.Add_Click({
+    Run-Py 'Compare local models (writes two test scripts with each)' 'modelbench.py' @('--workspace', $Work, '--save') { Load-DefaultModel }
+})
 $b = Add-Button $t1 'Build style bible (local)' 490 140 230
 $b.Add_Click({
     if (-not (Test-Path (Join-Path $Work 'library\index.json'))) { Msg 'Index your episodes first (Create tab > Index footage).'; return }
@@ -539,7 +703,7 @@ $note = Add-Label $t1 ("Tips: 'balanced' samples scene changes. For a 45-min epi
 $note.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 2: Voice
-$t2 = New-Tab '2 - Voice clone'
+$t2 = New-Tab 'Voice clone'
 Add-Label $t2 'Sample source' 10 15 | Out-Null
 $vSrc = Add-Text $t2 150 15 640
 $b = Add-Button $t2 'Browse...' 800 13 110; $b.Add_Click({ $f = Pick-File 'Media|*.mp4;*.mov;*.mkv;*.webm;*.wav;*.mp3;*.m4a|All files|*.*'; if ($f) { $vSrc.Text = $f } })
@@ -666,7 +830,7 @@ $n3 = Add-Label $t3 ('Lip-sync: endpoint fal-ai/latentsync + Video + Audio (your
 $n3.Size = New-Object System.Drawing.Size(530, 70)
 
 # ================================================================ TAB 4: Assemble
-$t4 = New-Tab '4 - Assemble'
+$t4 = New-Tab 'Assemble'
 Add-Label $t4 'Clips (in order)' 10 15 | Out-Null
 $sClips = New-Object System.Windows.Forms.ListBox
 $sClips.Location = New-Object System.Drawing.Point(150, 15); $sClips.Size = New-Object System.Drawing.Size(640, 170)
@@ -720,7 +884,7 @@ $n4 = Add-Label $t4 'Render MP4 = fast ffmpeg assembly on CPU. HyperFrames = Cla
 $n4.Size = New-Object System.Drawing.Size(900, 40)
 
 # fal.ai is optional: move it to the end
-$tabs.TabPages.Remove($t3); $t3.Text = '5 - Cloud video (optional, fal.ai)'; $tabs.TabPages.Add($t3)
+$tabs.TabPages.Remove($t3); $t3.Text = 'Cloud (optional)'; $tabs.TabPages.Add($t3)
 $tabs.SelectedIndex = 0
 
 # ---------------------------------------------------------------- startup checks
@@ -771,7 +935,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 6) "expected 6 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 8) "expected 8 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -804,7 +968,7 @@ Check 'project arguments' {
     $dir = Get-Project
     Expect ($dir -eq $smokeDir) "unexpected project folder: $dir"
     $argv = @(Get-ProjectArgs $dir 'outline')
-    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites', '--framing') {
+    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--lipsync', '--soundbites', '--framing') {
         Expect ($argv -contains $need) "missing argument $need"
     }
     $cFrame.SelectedItem = 'Side by side'
@@ -828,6 +992,7 @@ Check 'scenes tab loads and selects' {
     Expect ([string]$eType.SelectedItem -eq 'soundbite' -and $eQuery.Text -eq 'cash flow') 'scene 2 fields not filled in'
     Expect ([string]$eLayout.SelectedItem -eq 'Left person') "scene 2 framing shows '$($eLayout.SelectedItem)'"
     Expect ((Get-FramingLabel 'wide') -eq 'Both in frame' -and (Get-FramingLabel 'nope') -eq '') 'framing labels are wrong'
+    Expect ((Get-FramingLabel 'speaker') -eq 'Active speaker') 'active-speaker framing is missing'
     Expect ((Get-SceneNumber) -eq 2) 'scene number is wrong'
     [string]$eList.Items[1]
 }
@@ -841,6 +1006,50 @@ Check 'brand kit dialog opens and saves' {
     }
     Expect ($kit.accent -match '^#[0-9A-F]{6}$') "accent is not a colour: $($kit.accent)"
     "accent $($kit.accent), font $($kit.font)"
+}
+Check 'highlights list' {
+    $hEp.Text = Join-Path $smokeDir 'My Episode 01.mp4'
+    $hdir = Get-HighlightsDir
+    Expect ((Split-Path $hdir -Leaf) -eq 'My-Episode-01') "clips folder name is '$(Split-Path $hdir -Leaf)'"
+    New-Item -ItemType Directory -Force -Path $hdir | Out-Null
+    $json = '{"clips":[{"file":"C:\\x\\clip_01.mp4","score":90,"seconds":31.5,"framing":"speaker","title":"Cash is king","text":"why cash flow"},' +
+            '{"file":"C:\\x\\clip_02.mp4","score":70,"seconds":22.0,"framing":"stack","title":"Hiring","text":"hiring is hard"}]}'
+    [System.IO.File]::WriteAllText((Join-Path $hdir 'highlights.json'), $json)
+    Load-Highlights
+    Expect ($hList.Items.Count -eq 2 -and $script:hlClips.Count -eq 2) "expected 2 clips, list shows $($hList.Items.Count)"
+    Expect ([string]$hList.Items[0] -match 'Cash is king' -and $script:hlClips[1] -eq 'C:\x\clip_02.mp4') 'clip rows are wrong'
+    Expect ($Framings[[string]$hFrame.SelectedItem] -eq 'speaker') 'highlights should default to the active-speaker framing'
+    Remove-Item $hdir -Recurse -Force
+    $hEp.Text = ''; Load-Highlights
+    [string]$hList.Items.Count + ' rows after clearing'
+}
+Check 'publish details save and load' {
+    $file = Get-PublishFile
+    [System.IO.File]::WriteAllText($file, '{"title":"Old","description":"line one\nline two","tags":"a, b","privacy":"unlisted","publish_at":"","video_id":"abc123","url":"https://youtu.be/abc123"}')
+    Load-Publish $true
+    Expect ($pTitle.Text -eq 'Old' -and [string]$pPrivacy.SelectedItem -eq 'unlisted' -and $pTags.Text -eq 'a, b') 'fields not loaded'
+    Expect ($pDesc.Lines.Count -eq 2) 'description line breaks were lost'
+    Expect ($script:pubUrl -eq 'https://youtu.be/abc123') 'uploaded link not picked up'
+    $pTitle.Text = 'New title'; $pPrivacy.SelectedItem = 'private'; $pWhen.Text = '2099-12-01 09:30'
+    Expect (Save-Publish) 'save failed'
+    $doc = [System.IO.File]::ReadAllText($file) | ConvertFrom-Json
+    Expect ($doc.title -eq 'New title' -and $doc.privacy -eq 'private' -and $doc.publish_at -eq '2099-12-01 09:30') 'edits not saved'
+    Expect ($doc.video_id -eq 'abc123' -and $doc.description -eq "line one`nline two") 'saving must keep the upload record and line breaks'
+    $pTitle.Text = ''; $pDesc.Text = ''; $pTags.Text = ''; $pWhen.Text = ''; $pPrivacy.SelectedIndex = 0
+    'saved and reloaded'
+}
+Check 'default model setting' {
+    $settings = Join-Path $Work 'settings.json'
+    $had = Test-Path $settings
+    $keep = if ($had) { [System.IO.File]::ReadAllText($settings) } else { '' }
+    $before = $cModel.Text
+    [System.IO.File]::WriteAllText($settings, '{"model":"smoke-model:1b"}')
+    Load-DefaultModel
+    $seen = $cModel.Text
+    if ($had) { [System.IO.File]::WriteAllText($settings, $keep) } else { Remove-Item $settings -Force }
+    $cModel.Text = $before
+    Expect ($seen -eq 'smoke-model:1b') "model box shows '$seen'"
+    'model box follows settings.json'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

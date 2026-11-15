@@ -52,8 +52,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         state["chats"] += 1
         fmt = req.get("format")
         user = req["messages"][-1]["content"]
-        if isinstance(fmt, dict) and "hooks" in fmt.get("properties", {}):
+        props = fmt.get("properties", {}) if isinstance(fmt, dict) else {}
+        if "hooks" in props:
             content = json.dumps(PLAN)
+        elif "ratings" in props:      # highlight finder: score each "[n] text" passage
+            import re
+            ratings = []
+            for n, text in re.findall(r"\[(\d+)\] ([^\n]*)", user):
+                score = 90 if text.startswith("why cash") else 70 if text.startswith("hiring") else 40
+                ratings.append({"id": int(n), "score": score, "title": "Cash is king" if score == 90 else "A moment"})
+            ratings.append({"id": 9999, "score": 100, "title": "not a real passage"})
+            content = json.dumps({"ratings": ratings})
+        elif "tags" in props:         # publish pack
+            content = json.dumps({"title": "Why cash flow kills good businesses", "description": "Short and true.\n\n#cash #business",
+                                  "tags": ["cash flow", "#small business", " "]})
         elif fmt:
             state["schema_seen"] = state["schema_seen"] or isinstance(fmt, dict)
             state["script_calls"] += 1

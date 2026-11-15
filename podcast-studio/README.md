@@ -41,6 +41,21 @@ Each video lives in `workspace\projects\<name>\`; `metrics.json` records timings
 `qa.json` holds the quality report. **Build style bible (local)** in the Analyze tab writes
 `workspace\style-bible.md` from the indexed episodes; the outline and script steps read it.
 
+## Highlights tab: clips straight from an episode
+Choose an indexed episode. The local model rates passages of the transcript, and the best ones are cut into
+finished clips with the hosts' own sound, word captions and a headline. **Active speaker** framing cuts to
+whoever is talking, using the LR-ASD model on the CPU.
+
+## Publish tab
+**Write title + description (local)** drafts them from the script. **Upload to YouTube** sends the finished
+video with your own Google sign-in, private by default, optionally scheduled. Nothing leaves the PC until you
+press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file from Google Cloud Console.
+
+## Optional extras
+- `-WithWhisperX`: more exact word timing, and who-said-what labels when the `HF_TOKEN` environment variable is set.
+- `-WithLipSync`: MuseTalk re-syncs a single host's lips to the narration (tick **Lip-sync**). Slow on a 4 GB card.
+- **Compare local models** (Analyze tab) tests each installed model on two scripts and makes the best the default.
+
 ## Other tabs
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
 optional fal.ai tab for cloud clips. Claude Code buttons are optional extras.

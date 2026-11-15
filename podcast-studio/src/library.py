@@ -8,32 +8,38 @@ import math
 import os
 import re
 
-from common import ensure_dir, fail, log, read_json, transcribe, write_json
+from common import ensure_dir, fail, log, read_json, transcribe_words, write_json
 
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
 WINDOW = 20.0  # seconds of speech per searchable chunk
 
 
 def _chunks(segs):
-    """Group transcript segments into ~20 s chunks: (start, end, text, [segments])."""
+    """Group transcript segments into ~20 s chunks: (start, end, text, [[start, end, text]], [[start, end, word]])."""
     out, cur = [], None
-    for start, end, text in segs:
-        seg = [round(start, 2), round(end, 2), text]
+    for seg in segs:
+        start, end, text = seg["start"], seg["end"], seg["text"]
+        row = [round(start, 2), round(end, 2), text]
         if cur is None:
-            cur = [start, end, text, [seg]]
+            cur = [start, end, text, [row], list(seg.get("words") or [])]
         elif end - cur[0] <= WINDOW:
             cur[1], cur[2] = end, cur[2] + " " + text
-            cur[3].append(seg)
+            cur[3].append(row)
+            cur[4] += seg.get("words") or []
         else:
             out.append(tuple(cur))
-            cur = [start, end, text, [seg]]
+            cur = [start, end, text, [row], list(seg.get("words") or [])]
     if cur:
         out.append(tuple(cur))
     return out
 
 
 def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
-    """Choose a 4-10 s spoken passage inside a chunk. Returns (start, seconds, [(rel_start, rel_end, text)])."""
+    """Choose a 4-10 s spoken passage inside a chunk.
+
+    Returns (start, seconds, [(rel_start, rel_end, text)], [[rel_start, rel_end, word]]).
+    With word timing in the index the cut starts on the first word and ends on the last.
+    """
     segs = chunk.get("segs") or [[chunk["start"], chunk["end"], chunk["text"]]]
     qw = set(_words(query))
     best = max(range(len(segs)), key=lambda i: (len(qw & set(_words(segs[i][2]))), -i))
@@ -44,8 +50,12 @@ def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
         picked.append(seg)
         end = seg[1]
     end = min(end, start + max_s)
+    words = [w for w in chunk.get("words") or [] if w[0] >= start - 0.05 and w[1] <= end + 0.05]
+    if words:
+        start, end = max(0.0, words[0][0] - 0.12), words[-1][1]
     rel = [(max(0.0, a - start), min(b, end) - start, t) for a, b, t in picked if a < end]
-    return start, round(end - start + 0.15, 2), rel
+    rel_words = [[round(max(0.0, a - start), 2), round(b - start, 2), w] for a, b, w in words]
+    return round(start, 2), round(end - start + 0.2, 2), rel, rel_words
 
 
 def index(folder, lib, whisper="small", use_embeddings=True):
@@ -59,14 +69,17 @@ def index(folder, lib, whisper="small", use_embeddings=True):
         fail(f"No videos found in {folder}")
     for n, video in enumerate(sorted(videos), 1):
         stamp = f"{os.path.getsize(video)}-{int(os.path.getmtime(video))}"
-        if data["files"].get(video) == stamp:
+        mine = [c for c in data["chunks"] if c["file"] == video]
+        if data["files"].get(video) == stamp and mine and all("words" in c for c in mine):
             log(f"[{n}/{len(videos)}] already indexed: {os.path.basename(video)}")
             continue
+        if data["files"].get(video) == stamp:
+            log(f"[{n}/{len(videos)}] upgrading the index with word timing: {os.path.basename(video)}")
         log(f"[{n}/{len(videos)}] indexing {os.path.basename(video)}")
         data["chunks"] = [c for c in data["chunks"] if c["file"] != video]
-        for start, end, text, segs in _chunks(transcribe(video, whisper)):
+        for start, end, text, segs, words in _chunks(transcribe_words(video, whisper)):
             data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2),
-                                   "text": text, "segs": segs})
+                                   "text": text, "segs": segs, "words": words})
         data["files"][video] = stamp
         write_json(path, data)  # save after every file so a long run can resume
 

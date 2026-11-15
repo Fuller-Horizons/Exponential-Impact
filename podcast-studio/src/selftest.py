@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-from common import FF, duration, gpu_used_mb, log, read_text, write_json
+from common import FF, duration, gpu_used_mb, log, read_text, studio_root, whisperx_exe, write_json
 
 results = []
 
@@ -50,6 +50,29 @@ def torch_gpu():
         raise RuntimeError(f"torch {torch.__version__} sees no CUDA GPU (voice and stills will be slow on CPU)")
     p = torch.cuda.get_device_properties(0)
     return f"{p.name}, {p.total_memory / 2 ** 30:.1f} GB, torch {torch.__version__}"
+
+
+def face_model():
+    import cv2
+    import numpy as np
+    import visuals
+    path = os.path.join(studio_root(), "models", visuals.YUNET)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"{path} is missing - re-run the installer")
+    finder = visuals._face_finder(320, 180)
+    if finder.__name__ != "yunet":
+        raise RuntimeError("OpenCV cannot load the face model")
+    return f"loaded, {len(finder(np.zeros((180, 320, 3), dtype=np.uint8)))} faces in a blank frame (OpenCV {cv2.__version__})"
+
+
+def speaker_model():
+    import numpy as np
+    import speaker
+    if not speaker.available():
+        raise FileNotFoundError(f"LR-ASD is missing at {speaker.repo_dir()} - re-run the installer")
+    t0 = time.time()
+    scores = speaker.Detector().scores(np.zeros((50, 112, 112), dtype=np.uint8), np.zeros((200, 13)))
+    return f"loaded; scored 2 s of blank video in {time.time() - t0:.1f}s (mean {scores.mean():+.1f}, below 0 = not speaking)"
 
 
 def ollama_ready(model):
@@ -137,9 +160,16 @@ def main():
     log("Python packages")
     for m in ("torch", "faster_whisper", "qwen_tts", "PIL", "soundfile"):
         check(m, module(m))
-    for m in ("cv2", "diffusers", "fal_client"):
+    for m in ("cv2", "diffusers", "fal_client", "googleapiclient", "google_auth_oauthlib"):
         check(m, module(m), required=False)
     check("GPU", torch_gpu, required=False)
+    log("Faces and speakers")
+    check("face detector model", face_model)
+    check("active-speaker model (LR-ASD)", speaker_model, required=False)
+    log("Optional extras")
+    check("WhisperX (exact word timing)", lambda: whisperx_exe() or "not installed (built-in word timing is used)", required=False)
+    check("MuseTalk (lip-sync)", lambda: "installed" if __import__("lipsync").available() else "not installed (lip-sync is off)",
+          required=False)
     log("Local language model")
     check("ollama models", ollama_ready(a.model))
     log("Render")

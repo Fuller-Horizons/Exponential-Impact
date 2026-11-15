@@ -149,8 +149,8 @@ def resolve_sources(scenes, lib):
         if s["visual"] in ("footage", "soundbite"):
             hit = lib.search(s["query"])
             if hit and s["visual"] == "soundbite":
-                start, secs, segs = pick_soundbite(hit, s["query"])
-                s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs}
+                start, secs, segs, words = pick_soundbite(hit, s["query"])
+                s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs, "words": words}
                 s["narration"] = ""
             elif hit:
                 s["source"] = {"file": hit["file"], "start": hit["start"]}
@@ -160,6 +160,24 @@ def resolve_sources(scenes, lib):
                 s["visual"] = "card"
         out.append(s)
     return out
+
+
+def script_request(outline, target, kinds, bible=""):
+    """The (system, user) messages that ask a model for the narration and shot list."""
+    system = ("You write narration scripts and shot lists for short podcast videos. Reply with JSON only."
+              + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
+    user = (f"Turn this outline into a video of about {target:.0f} seconds. Narration is spoken at "
+            f"{WORDS_PER_SECOND} words per second, so write about {int(target * WORDS_PER_SECOND)} words of narration "
+            f"in total (each soundbite replaces about {int(SOUNDBITE_SECONDS * WORDS_PER_SECOND)} of those words)."
+            f"\n\nOUTLINE:\n{outline}\n\n"
+            "Return JSON: {\"title\": str, \"scenes\": [{\"narration\": str, \"visual\": str, "
+            "\"query\": str, \"card_text\": str, \"image_prompt\": str}]}\n"
+            "Rules:\n- One scene per sentence or two of narration (6 to 12 scenes).\n"
+            "- The first scene is the hook. The last scene is the call to action.\n"
+            "- Narration is spoken aloud: no emojis, no stage directions, no hashtags.\n"
+            "- \"visual\" must be one of: " + ", ".join(kinds) + ".\n"
+            + "\n".join("- " + EXPLAIN[k] for k in kinds) + "\n- Vary the visuals.")
+    return system, user
 
 
 def stage_script(project, cfg, force):
@@ -191,20 +209,7 @@ def stage_script(project, cfg, force):
     if cfg.get("stills"):
         kinds.append("still")
     target = float(cfg["seconds"])
-    bible = style_bible(project)
-    system = ("You write narration scripts and shot lists for short podcast videos. Reply with JSON only."
-              + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
-    base = (f"Turn this outline into a video of about {target:.0f} seconds. Narration is spoken at "
-            f"{WORDS_PER_SECOND} words per second, so write about {int(target * WORDS_PER_SECOND)} words of narration "
-            f"in total (each soundbite replaces about {int(SOUNDBITE_SECONDS * WORDS_PER_SECOND)} of those words)."
-            f"\n\nOUTLINE:\n{outline}\n\n"
-            "Return JSON: {\"title\": str, \"scenes\": [{\"narration\": str, \"visual\": str, "
-            "\"query\": str, \"card_text\": str, \"image_prompt\": str}]}\n"
-            "Rules:\n- One scene per sentence or two of narration (6 to 12 scenes).\n"
-            "- The first scene is the hook. The last scene is the call to action.\n"
-            "- Narration is spoken aloud: no emojis, no stage directions, no hashtags.\n"
-            "- \"visual\" must be one of: " + ", ".join(kinds) + ".\n"
-            + "\n".join("- " + EXPLAIN[k] for k in kinds) + "\n- Vary the visuals.")
+    system, base = script_request(outline, target, kinds, style_bible(project))
     t0, best, feedback = time.time(), None, ""
     for attempt in range(3):
         raw = llm.chat(system, base + feedback, cfg["model"], schema=scene_schema(kinds),
@@ -308,6 +313,7 @@ def stage_voice(project, cfg, force):
 # ------------------------------------------------------------------ stage: visuals
 def stage_visuals(project, cfg, force):
     import brand
+    import lipsync
     import visuals
 
     script = read_json(os.path.join(project, "script.json"))
@@ -329,7 +335,9 @@ def stage_visuals(project, cfg, force):
                 fail(f"Missing voice line {wav} - run the voice stage first.")
             secs = duration(wav) + 0.05
         choice = s.get("layout") or cfg.get("framing", "auto")
-        same_framing = kind not in ("soundbite", "footage") or s.get("framing_choice") == choice
+        want_sync = bool(cfg.get("lipsync")) and kind == "footage"
+        same_framing = kind not in ("soundbite", "footage") or (
+            s.get("framing_choice") == choice and bool(s.get("lipsync")) == (want_sync and lipsync.available()))
         if os.path.exists(out) and not force and same_framing and abs(duration(out) - secs) < 0.6:
             counts[kind] += 1
             continue
@@ -342,6 +350,11 @@ def stage_visuals(project, cfg, force):
                 s["framing"] = visuals.footage_clip(src["file"], src["start"], out, secs, fmt,
                                                     audio=kind == "soundbite", choice=choice)
                 s["framing_choice"] = choice
+                s["lipsync"] = False
+                if want_sync and s["framing"] == "single":
+                    s["lipsync"] = lipsync.sync(out, wav)
+                elif want_sync:
+                    log("  lip-sync skipped: it needs one person on screen (set the framing to a single person)")
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -405,8 +418,12 @@ def stage_render(project, cfg, force):
                       "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         real = duration(out)
         if s["visual"] == "soundbite":
-            for a, b, text in s["source"]["segs"]:
-                words += subs.word_times(text, offset + a, offset + min(b, real))
+            exact = s["source"].get("words")
+            if exact:  # word timing measured from the recording
+                words += [(w, offset + a, offset + min(b, real)) for a, b, w in exact if a < real]
+            else:
+                for a, b, text in s["source"]["segs"]:
+                    words += subs.word_times(text, offset + a, offset + min(b, real))
         else:
             words += subs.word_times(s["narration"], offset + 0.05, offset + max(0.3, real - 0.2))
         offset += real
@@ -464,13 +481,14 @@ def main():
     ap.add_argument("--library")
     ap.add_argument("--music")
     ap.add_argument("--device", choices=["cuda", "cpu"])
-    ap.add_argument("--framing", choices=["auto", "stack", "side", "wide", "single", "single-left", "single-right"],
+    ap.add_argument("--framing", choices=["auto", "stack", "side", "wide", "single", "single-left", "single-right", "speaker"],
                     help="How episode footage is framed (a scene's own 'layout' overrides this)")
     ap.add_argument("--stills", choices=["on", "off"])
     ap.add_argument("--captions", choices=["on", "off"])
     ap.add_argument("--soundbites", choices=["on", "off"])
     ap.add_argument("--qa-listen", choices=["on", "off"], dest="qa_listen")
     ap.add_argument("--voice-check", choices=["on", "off"], dest="voice_check")
+    ap.add_argument("--lipsync", choices=["on", "off"], help="Re-sync a single host's lips to the narration (MuseTalk)")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -484,7 +502,7 @@ def main():
                 "framing"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
-    for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check"):
+    for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check", "lipsync"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key) == "on"
     if not cfg.get("prompt"):

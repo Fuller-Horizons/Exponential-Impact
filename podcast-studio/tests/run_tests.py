@@ -83,14 +83,22 @@ def script_cleaning():
 @test
 def soundbite_picking():
     import library
-    chunks = library._chunks([(0, 3, "intro words"), (3, 6, "cash flow matters"), (6, 9, "more cash talk"),
-                              (9, 30, "a very long ramble"), (30, 33, "next chunk")])
+    seg = lambda a, b, t: {"start": a, "end": b, "text": t, "words": [[a, b, t.split()[0]]]}  # noqa: E731
+    chunks = library._chunks([seg(0, 3, "intro words"), seg(3, 6, "cash flow matters"), seg(6, 9, "more cash talk"),
+                              seg(9, 30, "a very long ramble"), seg(30, 33, "next chunk")])
+    assert len(chunks[0][4]) == 3, "word timing is carried into each chunk"
     assert len(chunks) == 3 and len(chunks[0][3]) == 3
     chunk = {"start": 0, "end": 9, "text": "x", "segs": chunks[0][3]}
-    start, secs, segs = library.pick_soundbite(chunk, "why cash flow matters")
-    assert start == 3 and 4.0 <= secs <= 10.2 and segs[0][2] == "cash flow matters" and segs[0][0] == 0
-    start, secs, segs = library.pick_soundbite({"start": 9, "end": 30, "text": "a very long ramble"}, "ramble")
-    assert start == 9 and secs <= 10.2 and segs[0][1] <= 10.0
+    start, secs, segs, words = library.pick_soundbite(chunk, "why cash flow matters")
+    assert start == 3 and 4.0 <= secs <= 10.3 and segs[0][2] == "cash flow matters" and segs[0][0] == 0 and words == []
+    start, secs, segs, words = library.pick_soundbite({"start": 9, "end": 30, "text": "a very long ramble"}, "ramble")
+    assert start == 9 and secs <= 10.3 and segs[0][1] <= 10.0
+    # with word timing the cut starts just before the first word and ends on the last one
+    chunk["words"] = [[3.4, 3.8, "cash"], [3.8, 4.3, "flow"], [4.3, 5.2, "matters"], [6.2, 6.9, "more"], [7.0, 7.6, "cash"],
+                      [7.7, 8.4, "talk"]]
+    start, secs, segs, words = library.pick_soundbite(chunk, "why cash flow matters")
+    assert abs(start - 3.28) < 0.01 and abs(secs - (8.4 - 3.28 + 0.2)) < 0.02, (start, secs)
+    assert words[0] == [0.12, 0.52, "cash"] and words[-1][2] == "talk"
 
 
 @test
@@ -185,6 +193,50 @@ def brand_kit():
     assert "Style: Cap,Impact," in text and "&H0000FF00" in text and "HELLO" in text
 
 
+@test
+def speaker_timeline_logic():
+    import numpy as np
+    import speaker
+    a, b = np.full(250, -2.0), np.full(250, -2.0)
+    a[:100], b[150:] = 3, 3
+    a[200:207], b[200:207] = 4, -1                      # a quarter-second interjection must not cause a cut
+    shots = speaker.smooth_timeline([a, b], 10.0)
+    assert [s[2] for s in shots] == [0, "both", 1] and shots[0][0] == 0.0 and shots[-1][1] == 10.0, shots
+    assert abs(shots[0][1] - 4.0) < 0.2 and abs(shots[1][1] - 6.0) < 0.2
+    b2 = np.full(250, -2.0)
+    b2[125:] = 3                                        # a one-second gap is a hand-over, given to the next speaker
+    assert [(round(s[0]), s[2]) for s in speaker.smooth_timeline([a * 0 - 2 + (np.arange(250) < 100) * 5, b2], 10.0)] == [(0, 0), (4, 1)]
+    assert speaker.smooth_timeline([np.array([])], 5.0) == [(0.0, 5.0, "both")]
+    tone = (np.sin(np.arange(16000) * 2 * np.pi * 220 / 16000) * 8000).astype(np.int16)
+    feats = speaker.mfcc(tone)
+    assert feats.shape == (99, 13) and np.isfinite(feats).all()
+    assert abs(feats[10, 0] - 17.7688) < 0.01, feats[10, 0]    # log energy of the test tone, matches the reference package
+    frames = np.zeros((5, 360, 640), dtype=np.uint8)
+    assert speaker.face_crops(frames, (0.78, 0.49, 0.08)).shape == (5, 112, 112)
+    assert speaker.face_crops(frames, (0.02, 0.02, 0.3)).shape == (5, 112, 112), "faces at the edge are padded"
+
+
+@test
+def publish_settings():
+    import publish
+    body = publish.request_body({"title": " My video ", "description": "d", "tags": "a, b ,,c", "privacy": "Unlisted", "publish_at": ""})
+    assert body["snippet"]["title"] == "My video" and body["snippet"]["tags"] == ["a", "b", "c"]
+    assert body["status"] == {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False}
+    at = publish.schedule_time("2099-12-01 09:30")
+    assert at.startswith("2099-1") and at.endswith("Z") and publish.schedule_time("") == ""
+    sched = publish.request_body({"title": "t", "privacy": "private", "publish_at": "2099-12-01 09:30"})
+    assert sched["status"]["publishAt"] == at
+    for bad in ({"title": "", "privacy": "private"}, {"title": "x" * 101, "privacy": "private"},
+                {"title": "t", "privacy": "everyone"}, {"title": "t", "privacy": "public", "publish_at": "2099-12-01 09:30"},
+                {"title": "t", "privacy": "private", "publish_at": "2001-01-01 09:30"},
+                {"title": "t", "privacy": "private", "publish_at": "next tuesday"}):
+        try:
+            publish.request_body(dict(publish.DEFAULTS, **bad))
+        except SystemExit:
+            continue
+        raise AssertionError(f"should have been refused: {bad}")
+
+
 # ------------------------------------------------------------------ end to end
 WORK = tempfile.mkdtemp(prefix="pstudio_tests_")
 ENV = None
@@ -205,7 +257,12 @@ def e2e_index_and_style_bible():
        "-i", "sine=f=300:d=120", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", os.path.join(eps, "ep1.mp4"))
     sh(PY, os.path.join(SRC, "library.py"), "index", eps, "--lib", LIB, env=ENV)
     index = json.load(open(os.path.join(LIB, "index.json"), encoding="utf-8"))
-    assert len(index["chunks"]) == 6 and all("vec" in c and c["segs"] for c in index["chunks"])
+    assert len(index["chunks"]) == 6 and all("vec" in c and c["segs"] and c["words"] for c in index["chunks"])
+    old = dict(index, chunks=[{k: v for k, v in c.items() if k != "words"} for c in index["chunks"]])
+    json.dump(old, open(os.path.join(LIB, "index.json"), "w", encoding="utf-8"))
+    assert "upgrading the index with word timing" in sh(PY, os.path.join(SRC, "library.py"), "index", eps, "--lib", LIB, env=ENV)
+    index = json.load(open(os.path.join(LIB, "index.json"), encoding="utf-8"))
+    assert all(c["words"] for c in index["chunks"])
     again = sh(PY, os.path.join(SRC, "library.py"), "index", eps, "--lib", LIB, env=ENV)
     assert "already indexed" in again
     bible = os.path.join(WORK, "ws", "style-bible.md")
@@ -267,7 +324,7 @@ def e2e_prompt_to_video():
     framed = [s for s in script["scenes"] if s["visual"] in ("footage", "soundbite")]
     assert framed and all(s["framing"] == "side" and s["framing_choice"] == "side" for s in framed), framed
     bite = next(s for s in script["scenes"] if s["visual"] == "soundbite")
-    assert bite["narration"] == "" and bite["source"]["segs"]
+    assert bite["narration"] == "" and bite["source"]["segs"] and bite["source"]["words"], "soundbites carry word timing"
     size = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of",
               "csv=p=0", os.path.join(PROJECT, "final.mp4")).strip()
     assert size == "1080,1920", size
@@ -352,6 +409,138 @@ def e2e_resume_and_outline_edit():
         f.write("5. extra beat\n")
     out = pipeline_run("--stage", "script")
     assert "Outline changed" in out and not os.path.exists(os.path.join(PROJECT, "voice"))
+
+
+@test
+def speaker_framing():
+    import speaker
+    import visuals
+    src, out = os.path.join(WORK, "eps", "ep1.mp4"), os.path.join(WORK, "speaker.mp4")
+    # no faces in the test footage: asking to follow the speaker falls back to automatic framing
+    assert visuals.footage_clip(src, 2, out, 1.0, "9:16", choice="speaker") == "center"
+    assert visuals.plan_layout([], True, "speaker") == ("center",)
+    # with two hosts found and a speaker timeline, the picture is cut shot by shot and keeps the sound
+    two = [(0.27, 0.40, 0.12), (0.73, 0.42, 0.11)]
+    real = (visuals.detect_faces, speaker.timeline)
+    visuals.detect_faces = lambda *a, **k: [two] * 6
+    speaker.timeline = lambda src, start, seconds, boxes: [(0.0, 1.5, 0), (1.5, 2.6, "both"), (2.6, seconds, 1)]
+    try:
+        for fmt, size in (("9:16", "1080,1920"), ("16:9", "1920,1080")):
+            assert visuals.footage_clip(src, 2, out, 4.0, fmt, audio=True, choice="speaker") == "speaker"
+            info = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height", "-show_entries",
+                      "format=duration", "-of", "csv=p=0", out)
+            assert f"video,{size}" in info and "audio" in info and abs(float(info.strip().splitlines()[-1]) - 4.0) < 0.25, info
+        speaker.timeline = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("model missing"))
+        assert visuals.footage_clip(src, 2, out, 1.0, "9:16", choice="speaker") == "stack", "falls back when the model fails"
+    finally:
+        visuals.detect_faces, speaker.timeline = real
+    boxes = visuals.find_host_boxes([two] * 6)
+    assert len(boxes) == 2 and boxes[0][0] < boxes[1][0] and len(boxes[0]) == 3
+    # a "face" far below the other is not a second host (seen with real footage and the old face finder)
+    assert visuals.find_hosts([[(0.54, 0.39, 0.2), (0.24, 0.83, 0.2)]] * 6)[0] is None
+    assert len(visuals.find_host_boxes([[(0.54, 0.39, 0.2), (0.24, 0.83, 0.2)]] * 6)) == 1
+
+
+@test
+def highlights_from_an_episode():
+    import highlights
+    index = json.load(open(os.path.join(LIB, "index.json"), encoding="utf-8"))
+    cands = highlights.passages(index["chunks"], 10, 20)
+    assert cands and all(10 <= c["end"] - c["start"] <= 20.01 for c in cands) and all(c["words"] for c in cands)
+    picked = highlights.choose([dict(c, score=n) for n, c in enumerate(cands)], 3)
+    assert len(picked) == 3 and picked[0]["score"] == len(cands) - 1
+    for a in picked:
+        for b in picked:
+            assert a is b or min(a["end"], b["end"]) - max(a["start"], b["start"]) <= 0.2 * (a["end"] - a["start"]) + 1e-6
+    ep, out = os.path.join(WORK, "eps", "ep1.mp4"), os.path.join(WORK, "ws", "highlights")
+    log = sh(PY, os.path.join(SRC, "highlights.py"), "--lib", LIB, "--episode", ep, "--out", out, "--count", "2",
+             "--min", "10", "--max", "20", env=ENV)
+    report = json.load(open(os.path.join(out, "ep1", "highlights.json"), encoding="utf-8"))
+    clips = report["clips"]
+    assert len(clips) == 2 and clips[0]["score"] == 90 and clips[0]["title"] == "Cash is king", clips
+    assert clips[0]["text"].startswith("why cash") and clips[0]["score"] >= clips[1]["score"]
+    for c in clips:
+        info = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "csv=p=0", c["file"])
+        assert "video,1080,1920" in info and "audio" in info and 10 <= c["seconds"] <= 21, (info, c["seconds"])
+        ass = open(os.path.splitext(c["file"])[0] + ".ass", encoding="utf-8").read()
+        assert "\\k" in ass and ",Title," in ass, "clips have word captions and a headline"
+    assert "not in the footage index" in sh(PY, os.path.join(SRC, "highlights.py"), "--lib", LIB, "--episode",
+                                            os.path.join(WORK, "ref.wav"), "--out", out, env=ENV, ok=1)
+
+
+@test
+def lip_sync_is_optional():
+    import lipsync
+    clip, wav = os.path.join(WORK, "lip.mp4"), os.path.join(WORK, "ref.wav")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=320x568:r=30:d=2", "-c:v", "libx264", clip)
+    before = os.path.getsize(clip)
+    assert not lipsync.available() and lipsync.sync(clip, wav) is False and os.path.getsize(clip) == before
+    # a stand-in MuseTalk that just copies the picture proves the wrapper finds and installs the result
+    fake = os.path.join(WORK, "FakeMuseTalk", "scripts")
+    os.makedirs(fake)
+    open(os.path.join(fake, "__init__.py"), "w").close()
+    open(os.path.join(fake, "inference.py"), "w").write(
+        "import argparse, os, re, shutil\n"
+        "p = argparse.ArgumentParser()\n"
+        "for a in ('inference_config', 'result_dir', 'unet_model_path', 'unet_config', 'version', 'batch_size', 'ffmpeg_path'):\n"
+        "    p.add_argument('--' + a)\n"
+        "p.add_argument('--use_float16', action='store_true')\n"
+        "a = p.parse_args()\n"
+        "cfg = open(a.inference_config).read()\n"
+        "video = re.search(r'video_path: \"(.*)\"', cfg).group(1)\n"
+        "assert os.path.exists(re.search(r'audio_path: \"(.*)\"', cfg).group(1))\n"
+        "os.makedirs(os.path.join(a.result_dir, 'v15'))\n"
+        "shutil.copy(video, os.path.join(a.result_dir, 'v15', 'synced.mp4'))\n")
+    os.environ.update(PSTUDIO_MUSETALK=os.path.dirname(fake), PSTUDIO_MUSETALK_PYTHON=PY)
+    try:
+        assert lipsync.available() and lipsync.sync(clip, wav) is True
+        fps = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", clip)
+        assert fps.strip() == "25/1", "the clip was replaced by the lip-synced 25 fps version"
+        # in a real run: only single-person footage scenes are lip-synced, and turning it on re-makes just those
+        env = dict(ENV, PSTUDIO_MUSETALK=os.path.dirname(fake), PSTUDIO_MUSETALK_PYTHON=PY)
+        out = sh(PY, os.path.join(SRC, "pipeline.py"), "--project", PROJECT, "--stage", "all", "--lipsync", "on",
+                 "--framing", "single-left", env=env)
+        scenes = json.load(open(os.path.join(PROJECT, "script.json"), encoding="utf-8"))["scenes"]
+        footage = [s for s in scenes if s["visual"] == "footage" and not s.get("layout")]
+        assert footage and all(s["lipsync"] and s["framing"] == "single" for s in footage), footage
+        assert not any(s.get("lipsync") for s in scenes if s["visual"] != "footage"), "soundbites keep their real lips"
+        assert "lip-syncing with MuseTalk" in out
+        assert json.load(open(os.path.join(PROJECT, "qa.json"), encoding="utf-8"))["verdict"] != "FAIL"
+    finally:
+        del os.environ["PSTUDIO_MUSETALK"], os.environ["PSTUDIO_MUSETALK_PYTHON"]
+
+
+@test
+def model_comparison_and_publish_pack():
+    ws = os.path.join(WORK, "ws")
+    out = sh(PY, os.path.join(SRC, "modelbench.py"), "--workspace", ws, "--save", "--try", env=ENV)
+    assert "BEST MODEL: gemma3:4b" in out and "nomic" not in out.split("Model ")[-1]
+    assert json.load(open(os.path.join(ws, "settings.json")))["model"] == "gemma3:4b"
+    table = json.load(open(os.path.join(ws, "model-comparison.json")))["results"]
+    assert table[0]["score"] > 50 and len(table[0]["notes"]) == 2
+    import publish
+    sh(PY, os.path.join(SRC, "publish.py"), "pack", "--project", PROJECT, env=ENV)
+    data = publish.load(PROJECT)
+    assert data["title"] == "Why cash flow kills good businesses" and data["tags"] == "cash flow, small business"
+    assert data["privacy"] == "private" and os.path.exists(os.path.join(PROJECT, "thumbnail.jpg"))
+
+    class Fake:                                     # a stand-in for the YouTube API client
+        calls = []
+
+        def videos(self):
+            return self
+
+        def insert(self, **kw):
+            Fake.calls.append(kw)
+            return self
+
+        def next_chunk(self):
+            return None, {"id": "abc123"}
+    done = publish.upload(PROJECT, Fake(), "MEDIA")
+    sent = Fake.calls[0]
+    assert sent["part"] == "snippet,status" and sent["media_body"] == "MEDIA"
+    assert sent["body"]["status"]["privacyStatus"] == "private" and sent["body"]["snippet"]["tags"] == ["cash flow", "small business"]
+    assert done["url"] == "https://youtu.be/abc123" and publish.load(PROJECT)["video_id"] == "abc123"
 
 
 @test

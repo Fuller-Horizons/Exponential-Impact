@@ -11,6 +11,9 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-PodcastStudio.ps1
   Options: -Root D:\PodcastStudio  -Model gemma3:4b  -SkipModels  -SkipClaude  -CpuOnly  -WithStills  -Upgrade
            -CheckOnly   (look at this PC and the network, install nothing)
+           -WithWhisperX  optional: more exact word timing (and who-said-what if HF_TOKEN is set). About 5 GB more.
+           -WithLipSync   optional: MuseTalk lip-sync in its own Python 3.10 environment. About 10 GB more, slow
+                          on a 4 GB card, and the least-tested part of this installer.
   A full log of every run is saved to <Root>\logs\install-<time>.log.
   Safe to re-run. Versions are pinned: a re-run reinstalls the exact set recorded in requirements.lock
   unless you pass -Upgrade.
@@ -23,16 +26,21 @@ param(
     [switch]$CpuOnly,
     [switch]$WithStills,
     [switch]$Upgrade,
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$WithWhisperX,
+    [switch]$WithLipSync
 )
 # Pinned upstream versions (verified to resolve together for Windows / Python 3.11)
 $Pins = @{
     'claude-video' = @{ repo = 'bradautomates/claude-video'; sha = '03ceb42f7fa2c4439aca01752118044baabffb8f' }
     'Qwen3-TTS'    = @{ repo = 'QwenLM/Qwen3-TTS';           sha = '022e286b98fbec7e1e916cb940cdf532cd9f488e' }
+    'LR-ASD'       = @{ repo = 'Junhua-Liao/LR-ASD';         sha = '1b6dcd2d8fc2895683de6508ec6294ec47d388ca' }
 }
+$MuseTalkSha = '0a89dec45a0192b824e3cf4daf96c239440c5ed8'
 $PyPins = 'faster-whisper==1.2.1', 'diffusers==0.39.0', 'pillow==13.0.0', 'fal-client==1.0.3',
-          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6', 'opencv-python-headless==4.12.0.88'
-$ModelFallbacks = 'gemma3:4b', 'qwen3:4b', 'phi4-mini', 'llama3.2:3b'
+          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6', 'opencv-python-headless==4.12.0.88',
+          'google-api-python-client==2.202.0', 'google-auth-oauthlib==1.5.0'
+$ModelFallbacks = 'gemma3:4b', 'phi4-mini', 'qwen3:4b', 'llama3.2:3b'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
@@ -148,7 +156,7 @@ if (-not $SkipClaude) {
 
 # ------------------------------------------------------------------ 4. folders + repos
 Step "Creating $Root"
-foreach ($d in 'repos', 'app', 'logs', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
+foreach ($d in 'repos', 'app', 'logs', 'models', 'workspace\highlights', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Root $d) | Out-Null
 }
 foreach ($name in $Pins.Keys) {
@@ -248,11 +256,66 @@ if ((-not $SkipClaude) -and (Has 'claude')) {
     Native 'plugin hyperframes'       { & claude plugin install hyperframes@hyperframes } -Soft | Out-Null
 }
 
+# ------------------------------------------------------------------ 7b. optional extras (their own environments)
+if ($WithWhisperX) {
+    Step 'WhisperX (optional: exact word timing, speaker labels)'
+    $wx = Join-Path $Root 'venv-whisperx'
+    if (-not (Test-Path (Join-Path $wx 'Scripts\python.exe'))) { Native 'create venv-whisperx' { & $pyLauncher -m venv $wx } -Soft | Out-Null }
+    $wxPy = Join-Path $wx 'Scripts\python.exe'
+    if (Test-Path $wxPy) {
+        Native 'pip upgrade (whisperx)' { & $wxPy -m pip install --upgrade --quiet pip } -Soft | Out-Null
+        if ($CpuOnly) { $ok = Native 'whisperx' { & $wxPy -m pip install --quiet 'whisperx==3.8.6' } -Soft }
+        else { $ok = Native 'whisperx' { & $wxPy -m pip install --quiet 'whisperx==3.8.6' --extra-index-url 'https://download.pytorch.org/whl/cu128' } -Soft }
+        if ($ok -and (Test-Path (Join-Path $wx 'Scripts\whisperx.exe'))) { Ok 'WhisperX installed (set the HF_TOKEN environment variable to add speaker labels)' }
+        else { Warn 'WhisperX did not install - the built-in word timing will be used instead' }
+    }
+}
+if ($WithLipSync) {
+    Step 'MuseTalk lip-sync (optional, Python 3.10 environment)'
+    & winget install --id Python.Python.3.10 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
+    Refresh-Path
+    $mt = Join-Path $Root 'repos\MuseTalk'
+    $mv = Join-Path $Root 'venv-musetalk'
+    $mvPy = Join-Path $mv 'Scripts\python.exe'
+    $lipOk = $true
+    if (-not (Test-Path (Join-Path $mt '.git'))) { $lipOk = Native 'git clone MuseTalk' { & git clone --depth 1 --quiet 'https://github.com/TMElyralab/MuseTalk' $mt } -Soft }
+    if ($lipOk) {
+        if (Native 'git fetch MuseTalk@pin' { & git -C $mt fetch --depth 1 --quiet origin $MuseTalkSha } -Soft) { & git -C $mt checkout --quiet --detach $MuseTalkSha }
+        if (-not (Test-Path $mvPy)) { $lipOk = Native 'create venv-musetalk' { & py -3.10 -m venv $mv } -Soft }
+    }
+    if ($lipOk) { $lipOk = Native 'torch 2.0.1 (cu118)' { & $mvPy -m pip install --quiet torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url 'https://download.pytorch.org/whl/cu118' } -Soft }
+    if ($lipOk) { $lipOk = Native 'MuseTalk requirements' { & $mvPy -m pip install --quiet -r (Join-Path $mt 'requirements.txt') } -Soft }
+    if ($lipOk) { $lipOk = Native 'openmim' { & $mvPy -m pip install --quiet --no-cache-dir -U openmim } -Soft }
+    foreach ($pkg in 'mmengine', 'mmcv==2.0.1', 'mmdet==3.1.0', 'mmpose==1.1.0') {
+        if ($lipOk) { $lipOk = Native "mim install $pkg" { & $mvPy -m mim install $pkg } -Soft }
+    }
+    if ($lipOk -and -not $SkipModels) {
+        # the project's own download script, minus the line that points it at a mirror site
+        $bat = (Get-Content (Join-Path $mt 'download_weights.bat')) | Where-Object { $_ -notmatch 'HF_ENDPOINT' }
+        Set-Content -Path (Join-Path $mt 'download_weights_official.bat') -Value $bat -Encoding ASCII
+        $oldPath = $env:Path
+        $env:Path = (Join-Path $mv 'Scripts') + ';' + $env:Path
+        Push-Location $mt
+        $lipOk = Native 'MuseTalk weights' { & cmd.exe /c 'download_weights_official.bat' } -Soft
+        Pop-Location
+        $env:Path = $oldPath
+    }
+    if ($lipOk -and (Test-Path (Join-Path $mt 'models\musetalkV15\unet.pth'))) { Ok 'MuseTalk installed (tick Lip-sync in the Create tab to use it)' }
+    else { Warn 'MuseTalk did not install completely - lip-sync stays off. Everything else is unaffected.' }
+}
+
 # ------------------------------------------------------------------ 8. app files
 Step 'Writing Podcast Studio app'
 $appDir = Join-Path $Root 'app'
 $files = [ordered]@{}
 #__FILES__
+$binaries = [ordered]@{}
+#__BINARIES__
+foreach ($name in $binaries.Keys) {
+    $target = Join-Path $Root $name
+    [System.IO.File]::WriteAllBytes($target, [Convert]::FromBase64String(($binaries[$name] -replace '\s', '')))
+    Ok $name
+}
 foreach ($name in $files.Keys) {
     $target = if ($name -eq 'CLAUDE.md') { Join-Path $Root 'workspace\CLAUDE.md' } else { Join-Path $appDir $name }
     if ($name -eq 'CLAUDE.md' -and (Test-Path $target)) { Ok 'workspace\CLAUDE.md kept (already exists)'; continue }

@@ -13,7 +13,7 @@ import os
 from common import fail, log, read_json, write_json, write_text
 
 KINDS = ("soundbite", "footage", "card", "still")
-FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right", "speaker")
 PARTS = (("voice", ".wav"), ("visuals", ".mp4"), ("visuals", ".png"), ("scenes", ".mp4"))
 
 
@@ -57,8 +57,8 @@ def find_source(project, cfg, scenes, i, skip_current=False):
     if not hit:
         fail("No other matching footage found for those search words.")
     if s["visual"] == "soundbite":
-        start, secs, segs = pick_soundbite(hit, s["query"])
-        s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs}
+        start, secs, segs, words = pick_soundbite(hit, s["query"])
+        s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs, "words": words}
         s["narration"] = ""
     else:
         s["source"] = {"file": hit["file"], "start": hit["start"]}

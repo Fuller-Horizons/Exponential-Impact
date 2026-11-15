@@ -109,12 +109,13 @@ def _expose_torch_cuda_dlls():
 _whisper = {}
 
 
-def transcribe(path, model_size="small", language=None, device=None):
-    """Transcribe with faster-whisper. Tries the GPU first, falls back to CPU int8.
+def studio_root():
+    """The PodcastStudio folder (parent of the app folder), or PSTUDIO_ROOT when set."""
+    return os.environ.get("PSTUDIO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    `device="cpu"` skips the GPU (used while another model is holding the VRAM).
-    Returns [(start, end, text)].
-    """
+
+def _faster_whisper(path, model_size, language, device, words):
+    """Run faster-whisper. Returns [{"start", "end", "text", "words": [[start, end, word], ...]}]."""
     _expose_torch_cuda_dlls()
     from faster_whisper import WhisperModel
 
@@ -128,13 +129,85 @@ def transcribe(path, model_size="small", language=None, device=None):
             if key not in _whisper:
                 log(f"Loading whisper-{model_size} on {dev} ({compute})...")
                 _whisper[key] = WhisperModel(model_size, device=dev, compute_type=compute)
-            segments, info = _whisper[key].transcribe(path, language=language, vad_filter=True)
-            return [(s.start, s.end, s.text.strip()) for s in segments]
+            segments, info = _whisper[key].transcribe(path, language=language, vad_filter=True,
+                                                      word_timestamps=bool(words))
+            out = []
+            for s in segments:
+                seg = {"start": s.start, "end": s.end, "text": s.text.strip(), "words": []}
+                for w in (getattr(s, "words", None) or []) if words else []:
+                    if w.word.strip():
+                        seg["words"].append([round(w.start, 2), round(w.end, 2), w.word.strip()])
+                out.append(seg)
+            return out
         except Exception as e:  # missing CUDA DLLs, OOM, etc.
             _whisper.pop(key, None)
             last = e
             log(f"  {dev}/{compute} failed: {e}")
     raise RuntimeError(f"Transcription failed: {last}")
+
+
+def whisperx_exe():
+    """Path to the optional WhisperX program (its own environment), or None."""
+    cand = [os.environ.get("PSTUDIO_WHISPERX"),
+            os.path.join(studio_root(), "venv-whisperx", "Scripts", "whisperx.exe"),
+            os.path.join(studio_root(), "venv-whisperx", "bin", "whisperx")]
+    return next((c for c in cand if c and os.path.exists(c)), None)
+
+
+def _whisperx(exe, path, model_size, language):
+    """Run WhisperX (forced word alignment; speaker labels when HF_TOKEN is set). Same shape as _faster_whisper."""
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="pstudio_wx_")
+    cmd = [exe, path, "--model", model_size, "--output_dir", tmp, "--output_format", "json",
+           "--compute_type", "int8", "--batch_size", "4"]
+    if language:
+        cmd += ["--language", language]
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        cmd += ["--diarize", "--hf_token", token, "--min_speakers", "1", "--max_speakers", "4"]
+    log("Transcribing with WhisperX" + (" (with speaker labels)" if token else "") + "...")
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    files = [f for f in os.listdir(tmp) if f.endswith(".json")]
+    if done.returncode != 0 or not files:
+        raise RuntimeError((done.stderr or done.stdout or "no output")[-400:])
+    data = read_json(os.path.join(tmp, files[0]))
+    out = []
+    for s in data.get("segments", []):
+        seg = {"start": float(s["start"]), "end": float(s["end"]), "text": str(s.get("text", "")).strip(), "words": []}
+        if s.get("speaker"):
+            seg["speaker"] = s["speaker"]
+        for w in s.get("words", []):
+            if "start" in w and "end" in w and str(w.get("word", "")).strip():
+                seg["words"].append([round(float(w["start"]), 2), round(float(w["end"]), 2), str(w["word"]).strip()])
+        out.append(seg)
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    return out
+
+
+def transcribe_words(path, model_size="small", language=None, device=None):
+    """Transcribe with word-level timing: [{"start", "end", "text", "words": [[start, end, word]], "speaker"?}].
+
+    Uses WhisperX when its optional environment is installed (more exact word timing, and who-said-what
+    when HF_TOKEN is set); otherwise faster-whisper's built-in word timestamps.
+    """
+    exe = whisperx_exe()
+    if exe and device != "cpu":
+        try:
+            return _whisperx(exe, path, model_size, language)
+        except Exception as e:  # noqa: BLE001
+            log(f"  WhisperX failed ({e}); using the built-in transcriber")
+    return _faster_whisper(path, model_size, language, device, words=True)
+
+
+def transcribe(path, model_size="small", language=None, device=None):
+    """Transcribe with faster-whisper. Tries the GPU first, falls back to CPU int8.
+
+    `device="cpu"` skips the GPU (used while another model is holding the VRAM).
+    Returns [(start, end, text)].
+    """
+    return [(s["start"], s["end"], s["text"]) for s in _faster_whisper(path, model_size, language, device, False)]
 
 
 def _plain_words(text):

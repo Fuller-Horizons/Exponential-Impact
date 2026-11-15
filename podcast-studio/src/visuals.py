@@ -83,20 +83,47 @@ def card_clip(text, out_mp4, seconds, fmt="9:16", kicker=None, brand=None):
     return kenburns(png, out_mp4, seconds, fmt, zoom=0.05)
 
 
+YUNET = "face_detection_yunet_2023mar.onnx"   # OpenCV Zoo face detector, MIT licence, 232 KB
+_face_note = []
+
+
+def _face_finder(width, height):
+    """A function frame -> [(x, y, w, h)] in pixels. YuNet when its model file is present, else the older Haar finder."""
+    import cv2
+    from common import studio_root
+
+    model = os.environ.get("PSTUDIO_YUNET") or os.path.join(studio_root(), "models", YUNET)
+    if os.path.exists(model) and hasattr(cv2, "FaceDetectorYN"):
+        net = cv2.FaceDetectorYN.create(model, "", (width, height), 0.7, 0.3, 50)
+
+        def yunet(frame):
+            _, found = net.detect(frame)
+            return [] if found is None else [tuple(float(v) for v in row[:4]) for row in found]
+        return yunet
+    if not _face_note:
+        _face_note.append(log("  (face model file missing - using the less reliable built-in face finder)"))
+    cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+
+    def haar(frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return [tuple(float(v) for v in f) for f in cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=6, minSize=(int(height * 0.08),) * 2)]
+    return haar
+
+
 def detect_faces(src, start, seconds, samples=6):
     """Faces in a few sampled frames: [[(centre_x, centre_y, width) as 0-1 fractions, ...] per frame].
 
-    Runs on the CPU with OpenCV's bundled detector. Returns [] if OpenCV is unavailable.
+    Runs on the CPU. Returns [] if OpenCV is unavailable.
     """
     try:
         import cv2
     except ImportError:
         return []
-    cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
     cap = cv2.VideoCapture(src)
-    if cascade.empty() or not cap.isOpened():
+    if not cap.isOpened():
         return []
-    frames = []
+    frames, finder = [], None
     for i in range(samples):
         cap.set(cv2.CAP_PROP_POS_MSEC, (start + seconds * (i + 0.5) / samples) * 1000)
         ok, frame = cap.read()
@@ -104,11 +131,10 @@ def detect_faces(src, start, seconds, samples=6):
             continue
         h, w = frame.shape[:2]
         scale = 640.0 / w if w > 640 else 1.0
-        gray = cv2.cvtColor(cv2.resize(frame, (int(w * scale), int(h * scale))), cv2.COLOR_BGR2GRAY)
-        found = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
-                                         minSize=(int(gray.shape[0] * 0.08),) * 2)
-        gh, gw = gray.shape[:2]
-        frames.append([((x + fw / 2) / gw, (y + fh / 2) / gh, fw / gw) for x, y, fw, fh in found])
+        small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        sh, sw = small.shape[:2]
+        finder = finder or _face_finder(sw, sh)
+        frames.append([((x + fw / 2) / sw, (y + fh / 2) / sh, fw / sw) for x, y, fw, fh in finder(small)])
     cap.release()
     return frames
 
@@ -118,14 +144,15 @@ def _median(values):
     return values[len(values) // 2]
 
 
-FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right", "speaker")
 ASSUMED_HOSTS = ((0.27, 0.40), (0.73, 0.40))  # where two hosts usually sit when their faces cannot be found
 
 
-def find_hosts(frames):
-    """(left, right, biggest): median face positions of two hosts side by side, and of the largest face.
+def _host_pairs(frames):
+    """Frames that show two plausible seated hosts: well separated, similar size, heads at a similar height.
 
-    left/right are None unless two well-separated, similar-sized faces show up in most frames.
+    The basic face finder sometimes reports a face where there is none; such false faces rarely sit level
+    with a real one or stay put, so these rules (and the 70% rule in the callers) filter most of them out.
     """
     with_faces = [f for f in frames if f]
     pairs = []
@@ -133,16 +160,36 @@ def find_hosts(frames):
         if len(f) < 2:
             continue
         a, b = sorted(f, key=lambda face: -face[2])[:2]
-        if abs(a[0] - b[0]) >= 0.25 and b[2] >= 0.5 * a[2]:
+        if abs(a[0] - b[0]) >= 0.25 and b[2] >= 0.35 * a[2] and abs(a[1] - b[1]) <= 0.25:
             pairs.append(sorted((a, b)))
+    return pairs if len(pairs) >= 2 and len(pairs) >= 0.7 * len(with_faces) else [], with_faces
+
+
+def find_hosts(frames):
+    """(left, right, biggest): median face positions of two hosts side by side, and of the largest face.
+
+    left/right are None unless two hosts show up in most frames.
+    """
+    pairs, with_faces = _host_pairs(frames)
     left = right = biggest = None
-    if len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
-        left = (_median([p[0][0] for p in pairs]), _median([p[0][1] for p in pairs]))
-        right = (_median([p[1][0] for p in pairs]), _median([p[1][1] for p in pairs]))
+    if pairs:
+        left = (float(_median([p[0][0] for p in pairs])), float(_median([p[0][1] for p in pairs])))
+        right = (float(_median([p[1][0] for p in pairs])), float(_median([p[1][1] for p in pairs])))
     if len(with_faces) >= 2:
         big = [max(f, key=lambda face: face[2]) for f in with_faces]
-        biggest = (_median([b[0] for b in big]), _median([b[1] for b in big]))
+        biggest = (float(_median([b[0] for b in big])), float(_median([b[1] for b in big])))
     return left, right, biggest
+
+
+def find_host_boxes(frames):
+    """Face boxes (centre_x, centre_y, width as 0-1) for the active-speaker model: [left, right], [one] or []."""
+    pairs, with_faces = _host_pairs(frames)
+    if pairs:
+        return [tuple(float(_median([p[k][d] for p in pairs])) for d in range(3)) for k in (0, 1)]
+    if len(with_faces) >= 2:
+        big = [max(f, key=lambda face: face[2]) for f in with_faces]
+        return [tuple(float(_median([b[d] for b in big])) for d in range(3))]
+    return []
 
 
 def plan_layout(frames, vertical=True, choice="auto"):
@@ -159,6 +206,8 @@ def plan_layout(frames, vertical=True, choice="auto"):
     When a two-host choice is asked for and two faces cannot be found, typical seat positions are assumed.
     """
     left, right, biggest = find_hosts(frames)
+    if choice == "speaker":      # following the speaker is done in footage_clip; this is its fallback
+        choice = "auto"
     if choice == "auto":
         if vertical and left:
             return ("stack", left, right)
@@ -238,10 +287,51 @@ def footage_filter(src_w, src_h, W, H, layout):
     return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
 
 
+def _encode(src, start, seconds, out_mp4, graph, sound):
+    run(FF + ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", src, "-filter_complex", graph, "-map", "[v]", *sound,
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
+
+
+def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
+    """Cut between the two hosts following who is speaking; the wide/stacked shot when both or neither are."""
+    import speaker
+
+    (W, H), (src_w, src_h) = size, src_size
+    left, right = (boxes[0][0], boxes[0][1]), (boxes[1][0], boxes[1][1])
+    shots = speaker.timeline(src, start, seconds, boxes)
+    both = ("stack", left, right) if H > W else ("wide", left, right)
+    tmp = out_mp4 + ".parts"
+    os.makedirs(tmp, exist_ok=True)
+    names = []
+    for n, (t0, t1, who) in enumerate(shots):
+        t0, t1 = round(t0 * 30) / 30, round(t1 * 30) / 30
+        if t1 - t0 < 1 / 30:
+            continue
+        layout = both if who == "both" else ("single", (left, right)[who])
+        log(f"  {t0:5.1f}-{t1:5.1f}s  {'both' if who == 'both' else ('left', 'right')[who] + ' host speaking'}")
+        name = f"p{n:03}.mp4"
+        _encode(src, start + t0, t1 - t0, os.path.join(tmp, name), footage_filter(src_w, src_h, W, H, layout), ["-an"])
+        names.append(name)
+    with open(os.path.join(tmp, "list.txt"), "w", encoding="utf-8") as f:
+        f.write("".join(f"file '{n}'\n" for n in names))
+    joined = "joined.mp4"
+    run(FF + ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", joined], cwd=tmp)
+    if audio:
+        run(FF + ["-i", os.path.join(tmp, joined), "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", src,
+                  "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                  "-shortest", out_mp4])
+    else:
+        os.replace(os.path.join(tmp, joined), out_mp4)
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    return len(names)
+
+
 def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None, choice="auto"):
     """Cut `seconds` of real footage at `start`, framed by `choice` (see plan_layout). Muted unless `audio`.
 
-    Returns the framing used: stack, side, wide, single or center.
+    choice "speaker" follows whoever is talking (needs two hosts on screen and the LR-ASD model); if that
+    cannot be done it falls back to "auto". Returns the framing used: speaker, stack, side, wide, single or center.
     """
     from common import video_size
 
@@ -252,15 +342,26 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     if not src_w:
         raise RuntimeError(f"cannot read video size of {src}")
     if layout is None:
-        frames = detect_faces(src, start, seconds)
-        layout = plan_layout(frames, vertical=H > W, choice=choice if choice in FRAMINGS else "auto")
+        if choice not in FRAMINGS:
+            choice = "auto"
+        frames = detect_faces(src, start, seconds, samples=10 if choice == "speaker" else 6)
+        if choice == "speaker":
+            boxes = find_host_boxes(frames)
+            try:
+                if len(boxes) != 2:
+                    raise RuntimeError("two hosts were not found on screen")
+                shots = _speaker_cut(src, start, seconds, out_mp4, (W, H), (src_w, src_h), boxes, audio)
+                log(f"  framing: speaker ({shots} shot{'s' if shots != 1 else ''})")
+                return "speaker"
+            except Exception as e:  # noqa: BLE001 - never lose the scene over framing
+                log(f"  cannot follow the speaker ({e}) - using automatic framing")
+                choice = "auto"
+        layout = plan_layout(frames, vertical=H > W, choice=choice)
         if choice in ("stack", "side", "single-left", "single-right") and not find_hosts(frames)[0]:
             log("  two hosts not found in this clip - using typical seat positions")
     log(f"  framing: {layout[0]}")
     sound = ["-map", "0:a?", "-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
-    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src,
-              "-filter_complex", footage_filter(src_w, src_h, W, H, layout), "-map", "[v]", *sound,
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
+    _encode(src, start, seconds, out_mp4, footage_filter(src_w, src_h, W, H, layout), sound)
     if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
