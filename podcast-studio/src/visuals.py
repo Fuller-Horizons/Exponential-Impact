@@ -19,8 +19,11 @@ def _font(size, preferred=()):
     return ImageFont.load_default()
 
 
-def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
-    """Render a title/quote card as a PNG in the brand colours: gradient, accent bar, centred wrapped text."""
+def card_image(text, out_png, fmt="9:16", kicker=None, brand=None, canvas=None, body=None):
+    """Render a title/quote card as a PNG in the brand colours: gradient, accent bar, centred wrapped text.
+
+    `canvas=(width, height)` overrides the video shape (used for carousel slides); `body` adds smaller text below.
+    """
     from PIL import Image, ImageDraw
 
     import brand as brandkit
@@ -28,7 +31,7 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
     kit = brand or brandkit.load()
     accent, ink, base = brandkit.rgb(kit["accent"]), brandkit.rgb(kit["text"]), brandkit.rgb(kit["background"], (32, 34, 62))
     fonts = brandkit.font_files(kit)
-    W, H = FORMATS[fmt]
+    W, H = canvas or FORMATS[fmt]
     column = Image.new("RGB", (1, H))
     for y in range(H):  # darker at the top, the brand background colour at the bottom
         t = 0.45 + 0.55 * y / H
@@ -47,7 +50,10 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
             break
         size = int(size * 0.9)
 
-    block_h = line_h * len(lines)
+    body_font = _font(int(size * 0.5), fonts)
+    body_lines = textwrap.wrap(" ".join(body.split()), max(12, int(W * 0.8 / (size * 0.5 * 0.56)))) if body else []
+    body_h = int(size * 0.5 * 1.4)
+    block_h = line_h * len(lines) + (int(size * 0.6) + body_h * len(body_lines) if body_lines else 0)
     y = (H - block_h) // 2
     bar_w, bar_h = int(W * 0.12), max(6, int(size * 0.14))
     draw.rectangle([(W - bar_w) // 2, y - bar_h * 4, (W + bar_w) // 2, y - bar_h * 3], fill=accent)
@@ -60,6 +66,11 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
         draw.text(((W - w) // 2 + 3, y + 3), line, font=font, fill=(0, 0, 0))
         draw.text(((W - w) // 2, y), line, font=font, fill=ink)
         y += line_h
+    y += int(size * 0.6)
+    for line in body_lines:
+        w = draw.textlength(line, font=body_font)
+        draw.text(((W - w) // 2, y), line, font=body_font, fill=tuple(int(c * 0.85) for c in ink))
+        y += body_h
     img.save(out_png)
     return out_png
 

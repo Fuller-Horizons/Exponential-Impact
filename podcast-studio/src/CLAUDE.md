@@ -9,13 +9,18 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
 - `style-bible.md` - the show's distilled style; the outline and script stages read it when present
-- `brand.json` - colours, font and logo for cards, captions and the corner logo (a project can hold its own copy)
+- `house-rules.md` - lasting corrections. Read it before any script, edit or post and follow every rule. When the user gives a note about an edit, add it here as one short rule.
+- `brand.json` - colours, font, logo and optional music bed for cards, captions and the corner logo (a project can hold its own copy)
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
 - One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
 - Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
 - Quality gate: `python ..\app\qa.py --project projects\x`
+- Prepare a raw recording for the Herk Edit Kit: `python ..\app\recording.py prepare --recording take.mp4 --slug my-take` (kit lives in `..\repos\herk-edit-kit`; edit there with its `short-form-edit` or `edit-video` skill)
+- Quick silence trim, no AI: `python ..\app\recording.py tighten --recording take.mp4`
+- Social posts from a project: `python ..\app\repurpose.py --project projects\x` (drafts in `projects\x\social`)
+- Import your own YouTube videos: `python ..\app\ytimport.py --url <link> --dest episodes --lib library`
 - Highlights (clips cut straight from an episode): `python ..\app\highlights.py --lib library --episode <file> --out highlights --count 5 --framing speaker`
 - Who is speaking: `python ..\app\speaker.py <video> --start 10 --seconds 8` (LR-ASD, CPU)
 - Compare local models and set the default: `python ..\app\modelbench.py --workspace . --save`

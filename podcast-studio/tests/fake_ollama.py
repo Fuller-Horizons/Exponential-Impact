@@ -63,6 +63,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ratings.append({"id": int(n), "score": score, "title": "Cash is king" if score == 90 else "A moment"})
             ratings.append({"id": 9999, "score": 100, "title": "not a real passage"})
             content = json.dumps({"ratings": ratings})
+        elif "linkedin" in props:     # social posts
+            content = json.dumps({"linkedin": "Most businesses do not die from bad ideas.\n\nThey run out of cash.\n\nWhat is your runway?",
+                                  "thread": ["You run out of cash, not ideas.", "Hiring early drains you.", "", "Watch it weekly. Full video on the channel."],
+                                  "slides": [{"headline": "Cash, not ideas", "body": "Why good businesses close."},
+                                             {"headline": "Hire late"}, {"body": "no headline here"},
+                                             {"headline": "Watch it weekly", "body": "Follow for more."}]})
         elif "tags" in props:         # publish pack
             content = json.dumps({"title": "Why cash flow kills good businesses", "description": "Short and true.\n\n#cash #business",
                                   "tags": ["cash flow", "#small business", " "]})

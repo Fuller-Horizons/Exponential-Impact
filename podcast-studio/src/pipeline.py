@@ -32,11 +32,17 @@ def save(project, cfg):
 
 
 def style_bible(project):
-    for p in (os.path.join(project, "style-bible.md"),
-              os.path.join(os.path.dirname(os.path.dirname(project)), "style-bible.md")):
+    """The show's style guide, with the house rules (lasting corrections) placed first so they win."""
+    workspace = os.path.dirname(os.path.dirname(project))
+    text = ""
+    for p in (os.path.join(project, "style-bible.md"), os.path.join(workspace, "style-bible.md")):
         if os.path.exists(p):
-            return read_text(p)[:6000]
-    return ""
+            text = read_text(p)[:6000]
+            break
+    rules = os.path.join(workspace, "house-rules.md")
+    if os.path.exists(rules) and read_text(rules).strip():
+        text = "HOUSE RULES (always follow these):\n" + read_text(rules).strip()[:3000] + ("\n\n" + text if text else "")
+    return text
 
 
 def library_dir(cfg, project):
@@ -441,8 +447,9 @@ def stage_render(project, cfg, force):
         cmd += ["--ass", ass]
     if kit["logo"] and os.path.exists(kit["logo"]):
         cmd += ["--logo", kit["logo"], "--logo-position", kit["logo_position"]]
-    if cfg.get("music") and os.path.exists(cfg["music"]):
-        cmd += ["--music", cfg["music"]]
+    music = cfg.get("music") or kit.get("music")
+    if music and os.path.exists(music):
+        cmd += ["--music", music]
     run(cmd)
     got = duration(final)
     ok = abs(got - offset) < 1.5

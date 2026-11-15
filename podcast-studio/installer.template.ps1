@@ -5,6 +5,8 @@
              PyTorch (CUDA 12.4), Qwen3-TTS 0.6B voice cloning, faster-whisper, diffusers, Pillow,
              a local language model (Ollama), claude-video "watch" skill, HyperFrames CLI.
   After install everything in the Create tab runs on this PC with no cloud calls.
+  Hybrid part: the "Edit recording" tab hands a raw recording to Claude Code (a cloud model, your subscription)
+  with the Herk Edit Kit by Nate Herk (MIT). Installing the kit runs its npm packages' install scripts.
   Creates :  <Root>\app\PodcastStudio.ps1 (GUI), <Root>\workspace, desktop shortcut.
 
   Run (normal PowerShell window, not admin):
@@ -35,6 +37,7 @@ $Pins = @{
     'claude-video' = @{ repo = 'bradautomates/claude-video'; sha = '03ceb42f7fa2c4439aca01752118044baabffb8f' }
     'Qwen3-TTS'    = @{ repo = 'QwenLM/Qwen3-TTS';           sha = '022e286b98fbec7e1e916cb940cdf532cd9f488e' }
     'LR-ASD'       = @{ repo = 'Junhua-Liao/LR-ASD';         sha = '1b6dcd2d8fc2895683de6508ec6294ec47d388ca' }
+    'herk-edit-kit' = @{ repo = 'nateherkai/herk-edit-kit';  sha = '10511e5af86fc47756ea89803b397422e2d89284' }
 }
 $MuseTalkSha = '0a89dec45a0192b824e3cf4daf96c239440c5ed8'
 $PyPins = 'faster-whisper==1.2.1', 'diffusers==0.39.0', 'pillow==13.0.0', 'fal-client==1.0.3',
@@ -156,7 +159,7 @@ if (-not $SkipClaude) {
 
 # ------------------------------------------------------------------ 4. folders + repos
 Step "Creating $Root"
-foreach ($d in 'repos', 'app', 'logs', 'models', 'workspace\highlights', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
+foreach ($d in 'repos', 'app', 'logs', 'models', 'workspace\highlights', 'workspace\episodes', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Root $d) | Out-Null
 }
 foreach ($name in $Pins.Keys) {
@@ -174,6 +177,17 @@ foreach ($name in $Pins.Keys) {
         else { Warn "${name}: pinned commit unavailable - using the cloned version" }
     }
 }
+
+# Herk Edit Kit (MIT, by Nate Herk): the editing skills Claude Code uses in the "Edit recording" tab
+$kit = Join-Path $Root 'repos\herk-edit-kit'
+if ((Test-Path (Join-Path $kit 'package.json')) -and (Has 'npm')) {
+    Step 'Herk Edit Kit packages (npm ci) - used by Claude Code to edit recordings'
+    Push-Location $kit
+    $kitOk = Native 'npm ci (herk-edit-kit)' { & npm ci --no-audit --no-fund --silent } -Soft
+    if ($kitOk) { Native 'kit setup' { & npm run setup --silent } -Soft | Out-Null }
+    Pop-Location
+    if ($kitOk) { Ok 'Herk Edit Kit ready' } else { Warn 'The kit packages did not install. "Edit recording" still prepares files; Claude Code can finish the setup.' }
+} else { Warn 'Herk Edit Kit or npm missing - the "Edit recording" tab will not have its editing skills.' }
 
 # ------------------------------------------------------------------ 5. Python environment
 Step 'Python environment (PyTorch + Qwen3-TTS + faster-whisper + fal.ai) - this is the big download'

@@ -41,6 +41,19 @@ Each video lives in `workspace\projects\<name>\`; `metrics.json` records timings
 `qa.json` holds the quality report. **Build style bible (local)** in the Analyze tab writes
 `workspace\style-bible.md` from the indexed episodes; the outline and script steps read it.
 
+## Edit recording tab: the hybrid part
+Record yourself, then:
+1. **Prepare** copies the recording into the [Herk Edit Kit](https://github.com/nateherkai/herk-edit-kit)
+   (MIT, by Nate Herk) and transcribes it on this PC, word by word, in the kit's format.
+2. **Edit with Claude Code** opens Claude Code in the kit with a prompt you can read and change. Claude then
+   cuts silences and mistakes, plans the story, and builds captions and motion graphics with the kit's skills.
+
+Claude Code is a cloud model and uses your Claude subscription: the transcript and editing decisions go to
+Claude, the video files stay on this PC. **Quick trim (no AI)** removes dead air locally and needs no model.
+
+**House rules** (`workspace\house-rules.md`) are lasting corrections. Add one from the Scenes tab or by telling
+Claude Code a note during an edit; every later script, edit and social post follows them.
+
 ## Highlights tab: clips straight from an episode
 Choose an indexed episode. The local model rates passages of the transcript, and the best ones are cut into
 finished clips with the hosts' own sound, word captions and a headline. **Active speaker** framing cuts to
@@ -51,9 +64,14 @@ whoever is talking, using the LR-ASD model on the CPU.
 video with your own Google sign-in, private by default, optionally scheduled. Nothing leaves the PC until you
 press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file from Google Cloud Console.
 
+**Write social posts (local)** drafts a LinkedIn post, an X thread and 4:5 carousel slides into the project's
+`social` folder. **Polish with Claude Code** sharpens them. They are drafts: nothing is posted for you.
+
 ## Optional extras
 - `-WithWhisperX`: more exact word timing, and who-said-what labels when the `HF_TOKEN` environment variable is set.
 - `-WithLipSync`: MuseTalk re-syncs a single host's lips to the narration (tick **Lip-sync**). Slow on a 4 GB card.
+- **Download + index (YouTube)** (Analyze tab) downloads your own videos into `workspace\episodes` and indexes them.
+- A **music bed** set in the Brand kit plays under every video, lowered while someone speaks.
 - **Compare local models** (Analyze tab) tests each installed model on two scripts and makes the best the default.
 
 ## Other tabs

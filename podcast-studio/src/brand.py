@@ -13,6 +13,7 @@ DEFAULT = {
     "font_file": "",
     "logo": "",                     # PNG shown in a corner of the whole video
     "logo_position": "top-right",   # top-right | top-left
+    "music": "",                    # a music file played quietly under every video (lowered while someone speaks)
 }
 # family name (used by captions) -> bold font file in C:\Windows\Fonts (used by cards)
 FONTS = {

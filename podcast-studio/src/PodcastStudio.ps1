@@ -56,6 +56,29 @@ function Get-FramingLabel([string]$value) {
     foreach ($k in $Framings.Keys) { if ($Framings[$k] -eq $value) { return $k } }
     return ''
 }
+$Kit = Join-Path $Root 'repos\herk-edit-kit'
+$RulesFile = Join-Path $Work 'house-rules.md'
+function Get-Slug([string]$name) {
+    $s = ([System.IO.Path]::GetFileNameWithoutExtension($name).ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+    if (-not $s) { $s = 'recording' }
+    return $s
+}
+function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
+    $text = ($text -replace '\s+', ' ').Trim()
+    if (-not $text) { return $false }
+    if (-not (Test-Path $file)) {
+        [System.IO.File]::WriteAllText($file, "# House rules`n`nLasting corrections. Every script, edit and post follows these.`n`n")
+    }
+    [System.IO.File]::AppendAllText($file, "- $text`n")
+    return $true
+}
+function Start-Claude([string]$dir, [string]$promptFile) {
+    # Opens Claude Code in its own window with the prompt read from a file (no quoting problems)
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.'; return $false }
+    $safe = $promptFile -replace "'", "''"
+    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "claude (Get-Content -Raw -LiteralPath '$safe')"
+    return $true
+}
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
 $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
@@ -320,7 +343,7 @@ $n0.Size = New-Object System.Drawing.Size(760, 34)
 function Show-BrandKit([string]$path = '') {
     if (-not $path) { $path = Join-Path $Work 'brand.json' }
     $kit = @{ accent = '#FFC400'; background = '#20223E'; text = '#FFFFFF'; caption_highlight = '#FFD700'
-              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right' }
+              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right'; music = '' }
     if (Test-Path $path) {
         try {
             $saved = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
@@ -328,7 +351,7 @@ function Show-BrandKit([string]$path = '') {
         } catch { }
     }
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 400); $f.StartPosition = 'CenterParent'
+    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 440); $f.StartPosition = 'CenterParent'
     $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     $pick = {
         $d = New-Object System.Windows.Forms.ColorDialog
@@ -369,8 +392,17 @@ function Show-BrandKit([string]$path = '') {
     Add-Label $f 'Logo corner' 20 $y 200 | Out-Null
     $pos = Add-Combo $f 230 $y 120 @('top-right', 'top-left')
     if ($pos.Items.Contains([string]$kit.logo_position)) { $pos.SelectedItem = [string]$kit.logo_position }
-    $ok = Add-Button $f 'Save' 300 310 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
-    $cancel = Add-Button $f 'Cancel' 400 310 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    $y += 36
+    Add-Label $f 'Music bed (optional)' 20 $y 200 | Out-Null
+    $music = Add-Text $f 230 $y 170 ([string]$kit.music)
+    $mb = Add-Button $f '...' 405 ($y - 2) 35
+    $mb.Tag = $music
+    $mb.Add_Click({ $p = Pick-File $AudioFilter $Work; if ($p) { $this.Tag.Text = $p } })
+    $mc = Add-Button $f 'Clear' 445 ($y - 2) 50
+    $mc.Tag = $music
+    $mc.Add_Click({ $this.Tag.Text = '' })
+    $ok = Add-Button $f 'Save' 300 350 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
+    $cancel = Add-Button $f 'Cancel' 400 350 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
     if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::OK }) }
     if ($f.ShowDialog($form) -ne 'OK') { return }
     $out = [ordered]@{}
@@ -382,16 +414,95 @@ function Show-BrandKit([string]$path = '') {
     $out['caption_uppercase'] = [bool]$upper.Checked
     $out['logo'] = $logo.Text
     $out['logo_position'] = [string]$pos.SelectedItem
+    $out['music'] = $music.Text
     [System.IO.File]::WriteAllText($path, ($out | ConvertTo-Json))
     Log "Brand kit saved: $path (used by the next video you make)"
 }
+
+# ================================================================ TAB: Edit recording (hybrid: prepared here, edited by Claude Code + Herk Edit Kit)
+$tR = New-Tab 'Edit recording'
+Add-Label $tR 'Raw recording' 10 12 | Out-Null
+$rFile = Add-Text $tR 150 12 640
+$b = Add-Button $tR 'Browse...' 800 10 110
+$b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $rFile.Text = $f; $rSlug.Text = Get-Slug $f; Load-RecordingPrompt } })
+Add-Label $tR 'Project name' 10 47 | Out-Null
+$rSlug = Add-Text $tR 150 47 250
+Add-Label $tR 'Type' 415 47 40 | Out-Null
+$rKind = Add-Combo $tR 460 47 210 @('Short (reel or Short)', 'Long video')
+$rPrompt = Add-Text $tR 150 165 760 '' 175
+$lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
+$lr.Size = New-Object System.Drawing.Size(135, 80)
+
+function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
+function Get-RecordingProject {
+    if (-not $rSlug.Text.Trim()) { return $null }
+    return (Join-Path $Kit ("video-projects\" + $rSlug.Text.Trim()))
+}
+function Load-RecordingPrompt {
+    $rPrompt.Text = ''
+    $proj = Get-RecordingProject; if (-not $proj) { return }
+    $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
+    if (Test-Path $pf) { $rPrompt.Text = ([System.IO.File]::ReadAllText($pf) -replace "`r?`n", "`r`n") }
+}
+$rKind.Add_SelectedIndexChanged({ Load-RecordingPrompt })
+
+$b = Add-Button $tR '1. Prepare (transcribe here)' 150 85 220
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
+    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work) { Load-RecordingPrompt }
+})
+$b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
+$b.Add_Click({
+    $proj = Get-RecordingProject
+    if (-not $proj -or -not (Test-Path (Join-Path $proj 'assets\raw.json'))) { Msg 'Press "1. Prepare" first.'; return }
+    if (-not $rPrompt.Text.Trim()) { Load-RecordingPrompt }
+    $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
+    [System.IO.File]::WriteAllText($pf, ($rPrompt.Text -replace "`r`n", "`n"))
+    if (Start-Claude $Kit $pf) { Log "Claude Code opened in $Kit. Its window shows the edit; answer its questions there." }
+})
+$b = Add-Button $tR 'Open project folder' 590 85 160
+$b.Add_Click({ $proj = Get-RecordingProject; if ($proj -and (Test-Path $proj)) { Start-Process explorer.exe $proj } else { Msg 'Nothing prepared yet.' } })
+$b = Add-Button $tR 'House rules' 760 85 150
+$b.Add_Click({
+    if (-not (Test-Path $RulesFile)) { [void](Add-HouseRule 'Example: never open with "In this video". (Delete this line and add your own.)') }
+    Start-Process notepad.exe $RulesFile
+})
+$b = Add-Button $tR 'Quick trim (no AI)' 150 125 220
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    $out = [System.IO.Path]::ChangeExtension($rFile.Text, $null).TrimEnd('.') + '.tight.mp4'
+    $script:ctx = @{ out = $out }
+    Run-Py 'Quick trim: remove dead air (on this PC, no AI)' 'recording.py' @('tighten', '--recording', $rFile.Text, '--out', $out) {
+        if (Test-Path $script:ctx.out) { Start-Process explorer.exe "/select,`"$($script:ctx.out)`"" }
+    }
+})
+Add-Label $tR 'Removes pauses only and saves a copy next to the recording.' 380 125 530 | Out-Null
+$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit (cuts, story, captions, motion graphics). ' +
+    'The transcript and editing decisions go to Claude; the video files stay here. Uses your Claude subscription.') 150 348 760
+$nR.Size = New-Object System.Drawing.Size(760, 60)
 
 # ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
 $tS = New-Tab 'Scenes'
 $script:sceneData = @()
 $b = Add-Button $tS 'Load scenes' 10 10 120
 $b.Add_Click({ Load-Scenes $false })
-$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 760
+$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 600
+$b = Add-Button $tS 'Add a house rule...' 760 10 150
+$b.Add_Click({ Show-RuleDialog })
+function Show-RuleDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Add a house rule'; $f.Size = New-Object System.Drawing.Size(560, 230); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $l = Add-Label $f 'A lasting correction, in one sentence. Every future script, edit and post will follow it.' 15 12 520
+    $l.Size = New-Object System.Drawing.Size(520, 36)
+    $box = Add-Text $f 15 55 515 '' 70
+    $ok = Add-Button $f 'Save rule' 330 140 100; $ok.DialogResult = 'OK'
+    $cancel = Add-Button $f 'Cancel' 440 140 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::Cancel }) }
+    if ($f.ShowDialog($form) -ne 'OK') { return }
+    if (Add-HouseRule $box.Text) { Log "House rule saved: $($box.Text.Trim())" }
+}
 $eList = New-Object System.Windows.Forms.ListBox
 $eList.Location = New-Object System.Drawing.Point(10, 45); $eList.Size = New-Object System.Drawing.Size(340, 340)
 $eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font('Consolas', 9)
@@ -643,9 +754,34 @@ $b.Add_Click({
 })
 $b = Add-Button $tP 'Open' 830 285 80
 $b.Add_Click({ if ($script:pubUrl) { Start-Process $script:pubUrl } else { Msg 'This project has not been uploaded yet.' } })
+$b = Add-Button $tP 'Write social posts (local)' 150 320 210
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py 'Write LinkedIn post, X thread and carousel (local model)' 'repurpose.py' @('--project', $dir, '--model', $cModel.Text) {
+        $d = Join-Path (Get-Project) 'social'
+        if (Test-Path $d) { Start-Process explorer.exe $d }
+    }
+})
+$b = Add-Button $tP 'Open posts folder' 370 320 150
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $d = Join-Path $dir 'social'
+    if (Test-Path $d) { Start-Process explorer.exe $d } else { Msg 'No posts yet. Press "Write social posts (local)".' }
+})
+$b = Add-Button $tP 'Polish with Claude Code' 530 320 190
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $d = Join-Path $dir 'social'
+    if (-not (Test-Path (Join-Path $d 'linkedin.txt'))) { Msg 'Write the social posts first.'; return }
+    $pf = Join-Path $d 'polish-prompt.txt'
+    [System.IO.File]::WriteAllText($pf, ("Read script.txt, then social/linkedin.txt, social/x-thread.txt and social/carousel.txt. " +
+        "Rewrite the three posts so they are sharper and sound like this show, keeping every claim true to script.txt. " +
+        "Follow every rule in $RulesFile if it exists. Save over the same three files and show me what changed. Do not post anything anywhere."))
+    [void](Start-Claude $dir $pf)
+})
 $nP = Add-Label $tP ('Nothing leaves this PC until you press Upload and confirm. Videos upload as private unless you change Privacy. ' +
     'One-time setup: in Google Cloud Console create a project, enable "YouTube Data API v3", create an OAuth client of type "Desktop app", ' +
-    'download its JSON file and choose it with "YouTube sign-in file...". The first upload opens your browser to sign in.') 150 330 760
+    'download its JSON file and choose it with "YouTube sign-in file...". Social posts are drafts in the project''s social folder; nothing is posted.') 150 360 760
 $nP.Size = New-Object System.Drawing.Size(760, 80)
 
 # ================================================================ TAB 1: Analyze
@@ -698,8 +834,17 @@ $b.Add_Click({
         if (Test-Path $script:ctx.out) { Start-Process notepad.exe $script:ctx.out }
     }
 })
+$b = Add-Button $t1 'Download + index (YouTube)' 10 180 230
+$b.Add_Click({
+    if ($aSrc.Text -notlike 'http*') { Msg 'Paste a YouTube video, playlist or channel link in the box at the top.'; return }
+    Run-Py 'Download from YouTube and add to the footage library' 'ytimport.py' @('--url', $aSrc.Text, '--dest', (Join-Path $Work 'episodes'),
+        '--lib', (Join-Path $Work 'library'), '--max', $aMax.Text) { $cLib.Text = Join-Path $Work 'episodes' }
+})
+Add-Label $t1 'up to' 250 180 40 | Out-Null
+$aMax = Add-Text $t1 292 180 40 '5'
+Add-Label $t1 'videos. Only for videos you own or may reuse.' 340 180 400 | Out-Null
 $note = Add-Label $t1 ("Tips: 'balanced' samples scene changes. For a 45-min episode, analyse 5-10 min windows with Start/End. " +
-    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 190 900
+    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 222 900
 $note.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 2: Voice
@@ -935,7 +1080,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 8) "expected 8 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 9) "expected 9 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1050,6 +1195,25 @@ Check 'default model setting' {
     $cModel.Text = $before
     Expect ($seen -eq 'smoke-model:1b') "model box shows '$seen'"
     'model box follows settings.json'
+}
+Check 'recording tab and house rules' {
+    Expect ((Get-Slug 'C:\x\My Take #3 (final).MOV') -eq 'my-take-3-final') "slug is '$(Get-Slug 'C:\x\My Take #3 (final).MOV')'"
+    Expect ((Get-Slug '!!!.mp4') -eq 'recording') 'empty names need a fallback'
+    $rSlug.Text = 'smoke-take'
+    Expect ((Get-RecordingProject) -eq (Join-Path $Kit 'video-projects\smoke-take')) 'recording project path is wrong'
+    $rKind.SelectedIndex = 1
+    Expect ((Get-RecordingKind) -eq 'long') 'type box does not map to the long edit'
+    $rKind.SelectedIndex = 0
+    Expect ((Get-RecordingKind) -eq 'short') 'type box does not map to the short edit'
+    $rSlug.Text = ''
+    $rules = Join-Path $smokeDir 'rules.md'
+    Expect (Add-HouseRule "  Never   open with a greeting. " $rules) 'rule was not saved'
+    Expect (-not (Add-HouseRule '   ' $rules)) 'an empty rule must be refused'
+    [void](Add-HouseRule 'Keep hooks under ten words.' $rules)
+    $text = [System.IO.File]::ReadAllText($rules)
+    Expect ($text -match '# House rules' -and $text -match '- Never open with a greeting\.' -and $text -match '- Keep hooks under ten words\.') 'rules file content is wrong'
+    Show-RuleDialog
+    'slug, project path, type and rules file'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

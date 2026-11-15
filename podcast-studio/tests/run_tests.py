@@ -237,6 +237,31 @@ def publish_settings():
         raise AssertionError(f"should have been refused: {bad}")
 
 
+@test
+def silence_trimming_rules():
+    import recording
+    words = [[0.9, 1.2, "Hello"], [1.25, 2.5, "test."], [5.0, 6.3, "here"], [7.0, 7.4, "and"], [7.6, 8.0, "more."],
+             [9.2, 10.0, "end."]]
+    keep = recording.keep_ranges(words, 12.0)
+    assert keep[0] == (0.68, 2.644), keep            # 0.22 s lead-in; a 2.5 s pause keeps a 0.24 s breath, 60% before the cut
+    assert keep[1] == (4.904, 6.384), keep           # ...40% after it; then a 0.7 s mid-sentence pause keeps 0.14 s
+    assert keep[2][0] == 6.944 and keep[-1][1] == 10.34 and len(keep) == 4, keep
+    assert recording.keep_ranges([[1.0, 1.2, "a"], [1.6, 2.0, "b"]], 5.0) == [(0.78, 2.34)], "short pauses are left alone"
+    assert recording.keep_ranges([], 5.0) == [(0.0, 5.0)]
+    moved = recording.retime(words, keep)
+    assert len(moved) == len(words) and moved[0][0] == 0.22 and moved[-1][2] == "end."
+    assert all(b[0] >= a[1] - 0.01 for a, b in zip(moved, moved[1:])), "re-timed words stay in order"
+    assert abs(moved[-1][1] - (sum(b - a for a, b in keep) - 0.34)) < 0.02
+    assert recording.make_slug("C:/x/My Take #3 (final).MOV") == "my-take-3-final" and recording.make_slug("???") == "recording"
+    kit = recording.kit_transcript([{"text": "Hello test.", "words": [[0.9, 1.2, "Hello"], [1.25, 2.5, "test."]]}], 3.0)
+    assert kit == {"text": "Hello test.", "audio_duration_secs": 3.0,
+                   "words": [{"text": "Hello", "start": 0.9, "end": 1.2}, {"text": "test.", "start": 1.25, "end": 2.5}]}
+    for kind, skill in (("short", "short-form-edit"), ("long", "edit-video")):
+        text = recording.prompt("my-take", kind, "/ws")
+        assert skill in text and "video-projects/my-take/assets/raw.json" in text and "house-rules.md" in text
+        assert "Do not call ElevenLabs" in text
+
+
 # ------------------------------------------------------------------ end to end
 WORK = tempfile.mkdtemp(prefix="pstudio_tests_")
 ENV = None
@@ -541,6 +566,91 @@ def model_comparison_and_publish_pack():
     assert sent["part"] == "snippet,status" and sent["media_body"] == "MEDIA"
     assert sent["body"]["status"]["privacyStatus"] == "private" and sent["body"]["snippet"]["tags"] == ["cash flow", "small business"]
     assert done["url"] == "https://youtu.be/abc123" and publish.load(PROJECT)["video_id"] == "abc123"
+
+
+@test
+def recording_prepare_and_quick_trim():
+    import recording
+    take = os.path.join(WORK, "My Take 1.mov")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=12", "-f", "lavfi", "-i",
+       "sine=f=300:d=12", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", take)
+    # a stand-in kit folder (the real kit's scripts are not run by these tests)
+    kit = os.path.join(WORK, "kit")
+    os.makedirs(kit)
+    open(os.path.join(kit, "CLAUDE.md"), "w").write("kit")
+    env = dict(ENV, PSTUDIO_KIT=kit)
+    out = sh(PY, os.path.join(SRC, "recording.py"), "prepare", "--recording", take, "--workspace", os.path.join(WORK, "ws"), env=env)
+    project = os.path.join(kit, "video-projects", "my-take-1")
+    assert "RECORDING PROJECT" in out and os.path.exists(os.path.join(project, "assets", "raw.mp4")), out
+    data = json.load(open(os.path.join(project, "assets", "raw.json"), encoding="utf-8"))
+    assert set(data) == {"text", "audio_duration_secs", "words"} and abs(data["audio_duration_secs"] - 12) < 0.3
+    assert data["words"] and set(data["words"][0]) == {"text", "start", "end"} and data["words"][0]["start"] < data["words"][-1]["end"]
+    assert "short-form-edit" in open(os.path.join(project, "prompt-short.txt")).read()
+    assert "edit-video" in open(os.path.join(project, "prompt-long.txt")).read()
+    again = sh(PY, os.path.join(SRC, "recording.py"), "prepare", "--recording", take, "--workspace", os.path.join(WORK, "ws"), env=env)
+    assert "Transcribing" not in again, "a prepared recording is not transcribed twice"
+    assert "lowercase" in sh(PY, os.path.join(SRC, "recording.py"), "prepare", "--recording", take, "--slug", "Bad Name", env=env, ok=1)
+    assert "not installed" in sh(PY, os.path.join(SRC, "recording.py"), "prepare", "--recording", take,
+                                 env=dict(ENV, PSTUDIO_KIT=os.path.join(WORK, "nokit")), ok=1)
+    # quick trim: speech at 1-2.5 s, 5-6.3 s and 9.2-10 s of a 12 s take
+    gapped = [{"text": "x", "words": [[1.0, 2.5, "Hello."], [5.0, 6.3, "there."], [9.2, 10.0, "end."]]}]
+    real = recording.transcribe_words
+    recording.transcribe_words = lambda *a, **k: gapped
+    try:
+        tight = os.path.join(WORK, "tight.mp4")
+        keep = recording.tighten(take, tight)
+    finally:
+        recording.transcribe_words = real
+    want = sum(b - a for a, b in keep)
+    got = float(sh("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", tight))
+    assert len(keep) == 3 and 4.0 < want < 5.2 and abs(got - want) < 0.25, (keep, got)
+    streams = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", tight)
+    assert "video" in streams and "audio" in streams
+    moved = json.load(open(os.path.join(WORK, "tight.words.json")))
+    assert [w[2] for w in moved] == ["Hello.", "there.", "end."] and moved[-1][1] <= got + 0.1
+
+
+@test
+def social_posts_house_rules_and_music():
+    import brand
+    import pipeline
+    ws = os.path.join(WORK, "ws")
+    open(os.path.join(ws, "house-rules.md"), "w").write("# House rules\n\n- Never say 'game changer'.\n")
+    guide = pipeline.style_bible(PROJECT)
+    assert guide.startswith("HOUSE RULES") and "game changer" in guide and "## Voice and tone" in guide
+    system, _ = pipeline.script_request("TITLE: x", 30, ["card"], guide)
+    assert "game changer" in system, "house rules reach the script writer"
+    out = sh(PY, os.path.join(SRC, "repurpose.py"), "--project", PROJECT, env=ENV)
+    social = os.path.join(PROJECT, "social")
+    assert "SOCIAL POSTS" in out and "runway" in open(os.path.join(social, "linkedin.txt")).read()
+    thread = open(os.path.join(social, "x-thread.txt")).read()
+    assert thread.startswith("1/3  You run out of cash") and "3/3" in thread, "blank thread posts are dropped"
+    slides = sorted(f for f in os.listdir(social) if f.startswith("slide_"))
+    assert slides == ["slide_01.png", "slide_02.png", "slide_03.png"], "slides without a headline are dropped"
+    from PIL import Image
+    assert Image.open(os.path.join(social, "slide_01.png")).size == (1080, 1350)
+    assert "Slide 2: Hire late" in open(os.path.join(social, "carousel.txt")).read()
+    # a music bed set in the brand kit is used by the render
+    music = os.path.join(WORK, "bed.wav")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=110:d=3", music)
+    kit = json.load(open(os.path.join(ws, "brand.json")))
+    json.dump(dict(kit, music=music), open(os.path.join(ws, "brand.json"), "w"))
+    assert brand.load(PROJECT)["music"] == music
+    assert "--music" in pipeline_run("--stage", "render"), "the brand kit's music bed should reach the render"
+    json.dump(kit, open(os.path.join(ws, "brand.json"), "w"))
+    os.remove(os.path.join(ws, "house-rules.md"))
+
+
+@test
+def youtube_import_command():
+    import ytimport
+    cmd = ytimport.command("https://youtu.be/abc", "/eps", 3)
+    assert cmd[0] == "yt-dlp" and cmd[-1] == "https://youtu.be/abc" and cmd[cmd.index("--playlist-end") + 1] == "3"
+    assert "--download-archive" in cmd and any("height<=1080" in c for c in cmd)
+    assert "full YouTube link" in sh(PY, os.path.join(SRC, "ytimport.py"), "--url", "abc", "--dest", WORK, "--lib", LIB, env=ENV, ok=1)
+    if not shutil.which("yt-dlp"):
+        assert "yt-dlp is not installed" in sh(PY, os.path.join(SRC, "ytimport.py"), "--url", "https://youtu.be/abc", "--dest",
+                                               WORK, "--lib", LIB, env=ENV, ok=1)
 
 
 @test
