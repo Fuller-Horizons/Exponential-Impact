@@ -25,7 +25,7 @@ PLAN = {"title": "Cash Flow Wins", "hooks": ["You run out of cash, not ideas.",
                                              "Last year a friend closed her shop with a full order book."],
         "beats": ["a", "b", "c", "d"], "cta": "Follow."}
 OUTLINE = "TITLE: Cash Flow Wins\nHOOK: You run out of cash, not ideas.\nBEATS:\n1. a\n2. b\n3. c\n4. d\nCTA: Follow."
-state = {"chats": 0, "script_calls": 0, "schema_seen": False}
+state = {"chats": 0, "script_calls": 0, "schema_seen": False, "ctx": [], "keep": [], "unloaded": [], "loaded": ["gemma3:4b"]}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -42,14 +42,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if "version" in self.path:
             return self._send({"version": "test"})
+        if "/api/ps" in self.path:
+            return self._send({"models": [{"name": n} for n in state["loaded"]]})
         self._send({"models": [{"name": "gemma3:4b"}, {"name": "nomic-embed-text:latest"}]})
 
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if "/api/generate" in self.path:
+            state["unloaded"].append(req.get("model"))
+            return self._send({"done": True})
         if "embed" in self.path:
             vec = lambda t: [sum(w.startswith(k) for w in t.lower().split()) + 0.01 for k in KEYS]  # noqa: E731
             return self._send({"embeddings": [vec(t) for t in req["input"]]})
         state["chats"] += 1
+        state["ctx"].append(req.get("options", {}).get("num_ctx"))
+        state["keep"].append(req.get("keep_alive"))
         fmt = req.get("format")
         user = req["messages"][-1]["content"]
         props = fmt.get("properties", {}) if isinstance(fmt, dict) else {}

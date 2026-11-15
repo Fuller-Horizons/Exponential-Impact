@@ -228,6 +228,14 @@ if (-not $SkipModels) {
         } -Soft | Out-Null
     }
 
+    # Smaller conversation memory on the graphics card: flash attention, and an 8-bit KV cache (about half the
+    # memory of the default). Ollama reads these when it starts, so they apply after its next restart.
+    foreach ($kv in @(@('OLLAMA_FLASH_ATTENTION', '1'), @('OLLAMA_KV_CACHE_TYPE', 'q8_0'), @('OLLAMA_MAX_LOADED_MODELS', '1'))) {
+        if (-not [Environment]::GetEnvironmentVariable($kv[0], 'User')) {
+            [Environment]::SetEnvironmentVariable($kv[0], $kv[1], 'User')
+            Set-Item -Path "Env:$($kv[0])" -Value $kv[1]
+        }
+    }
     Step "Local language model (Ollama: $Model + nomic-embed-text)"
     if (Has 'ollama') {
         $up = $false

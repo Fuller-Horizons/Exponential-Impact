@@ -33,6 +33,15 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
 
+## Memory (this PC: 16 GB RAM, 4 GB graphics card)
+- Never render cuts with one ffmpeg filter graph of many trim/atrim filters: it ran out of memory on a 10-minute
+  1080p test. Use `python ..\app\recording.py render --video in.mp4 --keep keep.json --out out.mp4`
+  (keep.json = [[start, end], ...] in seconds); it renders one piece at a time.
+- Split recordings longer than about 15 minutes: `recording.py split --recording x.mp4 --slug name --minutes 8`,
+  edit each part, then `recording.py join --slug name`.
+- Only one GPU model at a time: Ollama is unloaded before the voice model, AI stills or lip-sync start.
+- `workspace\settings.json`: `"encoder": "auto|cpu|nvenc"`, `"proxies": true|false`, `"model": "<default model>"`.
+
 ## Rules
 - Only clone voices of people who have consented.
 - Nothing is uploaded anywhere unless `publish.py upload` is run; uploads default to private.

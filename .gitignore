@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+podcast-studio/logs/
+podcast-studio/workspace/

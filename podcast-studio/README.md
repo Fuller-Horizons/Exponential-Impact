@@ -78,6 +78,21 @@ press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file f
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
 optional fal.ai tab for cloud clips. Claude Code buttons are optional extras.
 
+## Built for a modest PC (i7, 16 GB RAM, 4 GB graphics card)
+- **Long recordings are cut piece by piece.** One ffmpeg filter graph with many cuts went past 13 GB on a
+  10-minute 1080p test and was killed; one piece at a time stays under 0.5 GB. Claude Code is told to use the
+  same method (`recording.py render`).
+- **Split long recordings** (Edit recording tab) into parts of about 8 minutes at natural pauses; each part is
+  edited and rendered on its own, then **Join edited parts** puts them back together.
+- **Transcription runs in 10-minute pieces** and resumes where it stopped if the PC is interrupted.
+- **4K footage gets a 1080p working copy** when it is indexed (once). Measured: cutting a 5 s scene 2.7 s -> 1.3 s,
+  scanning for faces 5.5 s -> 0.8 s. Turn off with `"proxies": false` in `workspace\settings.json`.
+- **Finished scenes are not re-encoded again.** A 50-second video's final render went from about 45 s to about 20 s.
+- **NVENC:** if the graphics card's video encoder works, encoding moves off the CPU (tested once, remembered in
+  `logs\encoder.json`). Force the CPU with `"encoder": "cpu"` in `workspace\settings.json`.
+- **The language model gets only the memory it needs** (a smaller conversation window, an 8-bit cache, flash
+  attention) and is unloaded before the voice model or AI stills need the card.
+
 ## Pinned versions
 Upstream repos are checked out at fixed commits and Python packages are pinned; the first install writes
 `requirements.lock` and re-runs reuse it. `-Upgrade` moves to the latest.

@@ -23,12 +23,16 @@ class _Info:
     language = "en"
 
 
+CALLS = []
+
+
 class WhisperModel:
     def __init__(self, *args, **kw):
         if kw.get("device") == "cuda":
             raise RuntimeError("no GPU in tests")
 
     def transcribe(self, path, word_timestamps=False, **kw):
+        CALLS.append(path)
         out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
                               "default=nw=1:nk=1", path], capture_output=True, text=True)
         total = float(out.stdout.strip() or 0)

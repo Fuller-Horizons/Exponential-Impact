@@ -3,7 +3,7 @@ import argparse
 import os
 import textwrap
 
-from common import FF, FORMATS, duration, log, run
+from common import FF, FORMATS, duration, log, run, venc
 
 FONTS = [r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -83,8 +83,7 @@ def kenburns(image, out_mp4, seconds, fmt="9:16", zoom=0.10):
     vf = (f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
           f"zoompan=z='min(1+{step:.7f}*on,{1 + zoom})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
           f":d={frames}:s={W}x{H}:fps=30,fade=t=in:st=0:d=0.3,format=yuv420p")
-    run(FF + ["-i", image, "-vf", vf, "-frames:v", frames, "-c:v", "libx264", "-preset", "veryfast",
-              "-crf", "20", "-an", out_mp4])
+    run(FF + ["-i", image, "-vf", vf, "-frames:v", frames, *venc(20), "-an", out_mp4])
     return out_mp4
 
 
@@ -298,9 +297,58 @@ def footage_filter(src_w, src_h, W, H, layout):
     return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
 
 
+# ------------------------------------------------------------------ 1080p working copies of large footage
+def proxy_dir():
+    from common import studio_root
+    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "workspace", "proxies")
+
+
+def _proxy_path(src):
+    import hashlib
+    st = os.stat(src)
+    key = f"{os.path.abspath(src)}|{st.st_size}|{int(st.st_mtime)}"
+    return os.path.join(proxy_dir(), hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".mp4")
+
+
+def needs_proxy(src):
+    from common import video_size
+    w, h = video_size(src)
+    return max(w, h) > 1920
+
+
+def make_proxy(src):
+    """Write a 1080p copy of footage larger than 1080p, with a keyframe every second for fast, exact seeking.
+
+    The finished videos are 1080p at most, so nothing is lost; every later cut and face scan reads a quarter of
+    the pixels. Made once per episode (when it is indexed) and reused. Returns the copy's path, or None.
+    """
+    if not needs_proxy(src):
+        return None
+    out = _proxy_path(src)
+    if os.path.exists(out) and abs(duration(out) - duration(src)) < 1.0:
+        return out
+    os.makedirs(proxy_dir(), exist_ok=True)
+    log(f"  making a 1080p working copy of {os.path.basename(src)} (one time; speeds up every later cut)")
+    part = out + ".part.mp4"
+    run(FF + ["-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+              "scale=1920:1920:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+              *venc(18), "-g", "30", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", part])
+    os.replace(part, out)
+    return out
+
+
+def working_copy(src):
+    """The 1080p working copy of `src` if one has been made, else `src` itself."""
+    try:
+        p = _proxy_path(src)
+    except OSError:
+        return src
+    return p if os.path.exists(p) else src
+
+
 def _encode(src, start, seconds, out_mp4, graph, sound):
     run(FF + ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", src, "-filter_complex", graph, "-map", "[v]", *sound,
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
+              *venc(20), out_mp4])
 
 
 def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
@@ -347,6 +395,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     from common import video_size
 
     W, H = FORMATS[fmt]
+    src = working_copy(src)
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
     src_w, src_h = video_size(src)
@@ -376,7 +425,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
-                  "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", padded])
+                  "-an", *venc(20), padded])
         os.replace(padded, out_mp4)
     return layout[0]
 
@@ -401,6 +450,9 @@ class StillMaker:
         log(f"Loading {self.model} ({self.dtype}, {'cuda' if cuda else 'cpu'})...")
         pipe = StableDiffusionPipeline.from_pretrained(self.model, torch_dtype=self.dtype, safety_checker=None)
         pipe.enable_attention_slicing()
+        pipe.enable_vae_slicing()                  # decode the image in pieces: less graphics memory
+        from common import free_gpu
+        free_gpu()                                 # a language model left in memory would not leave room
         if cuda:
             (pipe.enable_sequential_cpu_offload if fp32 else pipe.enable_model_cpu_offload)()
         self.pipe = pipe

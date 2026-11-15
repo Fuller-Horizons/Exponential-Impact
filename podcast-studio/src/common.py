@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -114,6 +115,124 @@ def studio_root():
     return os.environ.get("PSTUDIO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def settings():
+    """workspace/settings.json: user choices such as {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true}."""
+    data = read_json(os.path.join(studio_root(), "workspace", "settings.json"), {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+# ------------------------------------------------------------------ video encoding
+# Every clip this app writes is tagged, so later steps know they can join clips without re-encoding them.
+ENC_VERSION = "1"
+X264 = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+NVENC_TRIES = (["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", "0", "-pix_fmt", "yuv420p"],
+               ["-c:v", "h264_nvenc", "-preset", "fast", "-rc", "vbr", "-b:v", "0", "-pix_fmt", "yuv420p"])
+_encoder = {}
+
+
+def _nvenc_args():
+    """NVENC settings that work on this PC, or None. Tested once and remembered in logs/encoder.json."""
+    cache = os.path.join(studio_root(), "logs", "encoder.json")
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    known = read_json(cache, {}) or {}
+    if known.get("ffmpeg") == ffmpeg and "nvenc" in known:
+        return known["nvenc"]
+    found = None
+    try:
+        listing = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20).stdout
+        if "h264_nvenc" in listing:
+            for args in NVENC_TRIES:
+                test = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                       "color=c=black:s=320x240:r=30:d=0.5", *args, "-cq", "23", "-f", "null", "-"],
+                                      capture_output=True, text=True, timeout=60)
+                if test.returncode == 0:
+                    found = args
+                    break
+    except (OSError, subprocess.TimeoutExpired):
+        found = None
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        write_json(cache, {"ffmpeg": ffmpeg, "nvenc": found})
+    except OSError:
+        pass
+    return found
+
+
+def encoder():
+    """("x264" | "nvenc", base args). NVENC moves video encoding from the CPU to the graphics card's encoder chip.
+
+    Choose with workspace/settings.json "encoder": "auto" (default), "cpu" or "nvenc", or PSTUDIO_ENCODER.
+    """
+    choice = (os.environ.get("PSTUDIO_ENCODER") or settings().get("encoder") or "auto").lower()
+    if choice not in _encoder:
+        nv = _nvenc_args() if choice in ("auto", "nvenc") else None
+        if choice == "nvenc" and not nv:
+            log("  NVENC was asked for but does not work here - using the CPU encoder")
+        _encoder[choice] = ("nvenc", nv) if nv else ("x264", X264)
+    return _encoder[choice]
+
+
+def venc(quality=20):
+    """Video encoder arguments for one output at `quality` (CRF-like: lower is better), plus this app's tag."""
+    kind, args = encoder()
+    q = ["-cq", str(quality + 1)] if kind == "nvenc" else ["-crf", str(quality)]
+    return list(args) + q + ["-metadata", f"comment=pstudio-enc={kind}-{ENC_VERSION}"]
+
+
+def enc_tag():
+    return f"pstudio-enc={encoder()[0]}-{ENC_VERSION}"
+
+
+def probe(path):
+    """Key facts about a media file for deciding whether it can be joined without re-encoding."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                          "stream=codec_type,codec_name,profile,width,height,pix_fmt,r_frame_rate,sample_rate,channels"
+                          ":format=duration:format_tags=comment", "-of", "json", path], capture_output=True, text=True)
+    try:
+        data = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    info = {"tag": (data.get("format", {}).get("tags", {}) or {}).get("comment", ""),
+            "duration": float(data.get("format", {}).get("duration") or 0)}
+    for st in data.get("streams", []):
+        kind = st.get("codec_type")
+        if kind == "video" and "video" not in info:
+            info["video"] = (st.get("codec_name"), st.get("profile"), st.get("width"), st.get("height"),
+                             st.get("pix_fmt"), st.get("r_frame_rate"))
+        elif kind == "audio" and "audio" not in info:
+            info["audio"] = (st.get("codec_name"), st.get("sample_rate"), st.get("channels"))
+    return info
+
+
+def joinable(paths, width, height, fps="30/1"):
+    """True when every clip was written by this app's current encoder at this size and frame rate, with AAC
+    48 kHz stereo sound, so they can be joined by copying (no re-encode)."""
+    tag = enc_tag()
+    first = None
+    for p in paths:
+        info = probe(p)
+        v, a = info.get("video"), info.get("audio")
+        if info["tag"] != tag or not v or not a or v[2:4] != (width, height) or v[4] != "yuv420p" or v[5] != fps:
+            return False
+        if a != ("aac", "48000", 2):
+            return False
+        if first is None:
+            first = v
+        elif v != first:
+            return False
+    return bool(paths)
+
+
+def free_gpu():
+    """Unload any language model Ollama is holding so the graphics card's memory is free for the next model."""
+    try:
+        import llm
+        llm.unload_all()
+    except Exception:  # noqa: BLE001 - Ollama not installed or not running: nothing to free
+        pass
+
+
+# ------------------------------------------------------------------ transcription
 def _faster_whisper(path, model_size, language, device, words):
     """Run faster-whisper. Returns [{"start", "end", "text", "words": [[start, end, word], ...]}]."""
     _expose_torch_cuda_dlls()
@@ -186,12 +305,7 @@ def _whisperx(exe, path, model_size, language):
     return out
 
 
-def transcribe_words(path, model_size="small", language=None, device=None):
-    """Transcribe with word-level timing: [{"start", "end", "text", "words": [[start, end, word]], "speaker"?}].
-
-    Uses WhisperX when its optional environment is installed (more exact word timing, and who-said-what
-    when HF_TOKEN is set); otherwise faster-whisper's built-in word timestamps.
-    """
+def _transcribe_piece(path, model_size, language, device):
     exe = whisperx_exe()
     if exe and device != "cpu":
         try:
@@ -199,6 +313,63 @@ def transcribe_words(path, model_size="small", language=None, device=None):
         except Exception as e:  # noqa: BLE001
             log(f"  WhisperX failed ({e}); using the built-in transcriber")
     return _faster_whisper(path, model_size, language, device, words=True)
+
+
+def chunk_seconds():
+    return float(os.environ.get("PSTUDIO_CHUNK_SECONDS") or 600)
+
+
+def _clock(t):
+    return f"{int(t // 60)}:{int(t % 60):02}"
+
+
+def transcribe_words(path, model_size="small", language=None, device=None, cache=None):
+    """Transcribe with word-level timing: [{"start", "end", "text", "words": [[start, end, word]], "speaker"?}].
+
+    Uses WhisperX when its optional environment is installed (more exact word timing, and who-said-what
+    when HF_TOKEN is set); otherwise faster-whisper's built-in word timestamps.
+
+    Long recordings are done in 10-minute pieces from a small 16 kHz copy of the sound. Each piece starts where
+    the last finished sentence ended, so no word is cut in half. With `cache` (a JSON path) finished pieces are
+    saved, and an interrupted run carries on where it stopped.
+    """
+    import tempfile
+
+    total, step, overlap = duration(path), chunk_seconds(), 30.0
+    if total <= step + overlap:
+        return _transcribe_piece(path, model_size, language, device)
+    state = read_json(cache, None) if cache else None
+    if not (isinstance(state, dict) and state.get("source") == os.path.abspath(path) and state.get("total") == round(total, 2)):
+        state = {"source": os.path.abspath(path), "total": round(total, 2), "next": 0.0, "segments": []}
+    elif state["next"] > 0:
+        log(f"  resuming the transcript at {_clock(state['next'])}")
+    tmp = tempfile.mkdtemp(prefix="pstudio_tx_")
+    try:
+        sound = os.path.join(tmp, "sound.wav")       # decode the recording once: 16 kHz mono is ~2 MB a minute
+        subprocess.run(FF + ["-i", path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", sound], check=True)
+        t = state["next"]
+        while t < total - 0.5:
+            length = min(step + overlap, total - t)
+            last = t + length >= total - 0.5
+            piece = os.path.join(tmp, "piece.wav")
+            subprocess.run(FF + ["-ss", f"{t:.3f}", "-t", f"{length:.3f}", "-i", sound, "-c:a", "pcm_s16le", piece],
+                           check=True)
+            segs = _transcribe_piece(piece, model_size, language, device)
+            keep = [s for s in segs if last or s["start"] < step]
+            for s in keep:
+                s["start"], s["end"] = round(s["start"] + t, 2), round(s["end"] + t, 2)
+                s["words"] = [[round(a + t, 2), round(b + t, 2), w] for a, b, w in s.get("words") or []]
+            state["segments"] += keep
+            nxt = keep[-1]["end"] if keep and not last else t + step
+            t = total if last else max(nxt, t + 1.0)
+            state["next"] = round(t, 2)
+            if cache:
+                write_json(cache, state)
+            log(f"  transcribed {_clock(min(t, total))} of {_clock(total)}")
+        return state["segments"]
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
 
 
 def transcribe(path, model_size="small", language=None, device=None):

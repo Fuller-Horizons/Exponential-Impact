@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 
-from common import FF, FORMATS, duration, fail, log, run, transcribe, write_srt
+from common import FF, FORMATS, duration, fail, joinable, log, run, transcribe, venc, write_srt
 
 LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
@@ -36,23 +36,25 @@ def main():
     W, H = FORMATS[a.format]
     tmp = tempfile.mkdtemp(prefix="pstudio_")
     try:
-        # 1. normalise every clip (size, fps, audio) so concat is safe
+        # 1. normalise every clip (size, fps, audio) so concat is safe - unless this app already wrote them that way
         norm = []
-        for i, c in enumerate(a.clips):
+        if joinable(a.clips, W, H):
+            log(f"{len(a.clips)} clips already match - joining without re-encoding")
+            norm = [os.path.abspath(c) for c in a.clips]
+        for i, c in enumerate([] if norm else a.clips):
             o = os.path.join(tmp, f"n{i:03}.mp4")
             vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                   f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p,setsar=1")
             cmd = FF + ["-i", c]
             if not has_audio(c):
                 cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest"]
-            cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                    "-c:a", "aac", "-ar", "48000", "-ac", "2", o]
+            cmd += ["-vf", vf, *venc(18), "-c:a", "aac", "-ar", "48000", "-ac", "2", o]
             log(f"Normalising {os.path.basename(c)}")
             run(cmd)
             norm.append(o)
         with open(os.path.join(tmp, "list.txt"), "w", encoding="utf-8") as f:
             for n in norm:
-                f.write(f"file '{os.path.basename(n)}'\n")
+                f.write("file '" + n.replace(os.sep, "/").replace("'", "'\\''") + "'\n")
         run(FF + ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "joined.mp4"], cwd=tmp)
         joined = os.path.join(tmp, "joined.mp4")
 
@@ -100,8 +102,7 @@ def main():
             graph += [f"[{n}:v]scale={int(W * 0.16)}:-1[logo]", f"{picture}[logo]overlay={x}:{pad}[branded]"]
             picture = "[branded]"
         if picture != "[0:v]":
-            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]", *venc(20)]
         else:
             cmd += ["-filter_complex", ";".join(graph), "-map", "0:v", "-map", "[aout]", "-c:v", "copy"]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]

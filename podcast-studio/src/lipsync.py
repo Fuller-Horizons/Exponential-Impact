@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
-from common import FF, duration, log, studio_root
+from common import FF, duration, free_gpu, log, studio_root, venc
 
 
 def repo_dir():
@@ -33,11 +33,11 @@ def sync(video, audio, timeout=3600):
     if not available():
         log("  lip-sync is not installed (run the installer with -WithLipSync)")
         return False
+    free_gpu()                                    # MuseTalk needs the whole 4 GB card
     repo, tmp = repo_dir(), tempfile.mkdtemp(prefix="pstudio_lip_")
     try:
         src = os.path.join(tmp, "in.mp4")       # MuseTalk expects 25 fps
-        subprocess.run(FF + ["-i", video, "-vf", "fps=25", "-an", "-c:v", "libx264", "-preset", "veryfast",
-                             "-crf", "18", src], check=True)
+        subprocess.run(FF + ["-i", video, "-vf", "fps=25", "-an", *venc(18), src], check=True)
         cfg = os.path.join(tmp, "task.yaml")
         with open(cfg, "w", encoding="utf-8") as f:
             f.write("task_0:\n"
@@ -55,8 +55,7 @@ def sync(video, audio, timeout=3600):
         if done.returncode != 0 or not os.path.exists(result) or duration(result) < 0.3:
             log("  lip-sync failed - keeping the original picture: " + (done.stderr or done.stdout or "no output")[-300:].strip())
             return False
-        subprocess.run(FF + ["-i", result, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                             "-pix_fmt", "yuv420p", video + ".sync.mp4"], check=True)
+        subprocess.run(FF + ["-i", result, "-an", "-vf", "fps=30", *venc(20), video + ".sync.mp4"], check=True)
         os.replace(video + ".sync.mp4", video)
         return True
     except Exception as e:  # noqa: BLE001 - lip-sync is a bonus, never a blocker

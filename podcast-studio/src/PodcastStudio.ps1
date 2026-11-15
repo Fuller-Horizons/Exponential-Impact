@@ -428,7 +428,11 @@ $b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $rFile.Text = $f; $rSlug.T
 Add-Label $tR 'Project name' 10 47 | Out-Null
 $rSlug = Add-Text $tR 150 47 250
 Add-Label $tR 'Type' 415 47 40 | Out-Null
-$rKind = Add-Combo $tR 460 47 210 @('Short (reel or Short)', 'Long video')
+$rKind = Add-Combo $tR 460 47 190 @('Short (reel or Short)', 'Long video')
+$rTight = New-Object System.Windows.Forms.CheckBox
+$rTight.Text = 'Remove pauses here first'; $rTight.Checked = $true
+$rTight.Location = New-Object System.Drawing.Point(662, 47); $rTight.Size = New-Object System.Drawing.Size(250, 24)
+$tR.Controls.Add($rTight)
 $rPrompt = Add-Text $tR 150 165 760 '' 175
 $lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
 $lr.Size = New-Object System.Drawing.Size(135, 80)
@@ -450,7 +454,9 @@ $b = Add-Button $tR '1. Prepare (transcribe here)' 150 85 220
 $b.Add_Click({
     if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
     if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
-    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work) { Load-RecordingPrompt }
+    $argv = @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work)
+    if ($rTight.Checked) { $argv += '--tighten' }
+    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' $argv { Load-RecordingPrompt }
 })
 $b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
 $b.Add_Click({
@@ -477,9 +483,30 @@ $b.Add_Click({
         if (Test-Path $script:ctx.out) { Start-Process explorer.exe "/select,`"$($script:ctx.out)`"" }
     }
 })
-Add-Label $tR 'Removes pauses only and saves a copy next to the recording.' 380 125 530 | Out-Null
-$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit (cuts, story, captions, motion graphics). ' +
-    'The transcript and editing decisions go to Claude; the video files stay here. Uses your Claude subscription.') 150 348 760
+$b = Add-Button $tR 'Split long recording' 380 125 160
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
+    $argv = @('split', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work, '--minutes', $rMinutes.Text)
+    if ($rTight.Checked) { $argv += '--tighten' }
+    Run-Py 'Split into parts (each part is its own project)' 'recording.py' $argv {
+        Log 'Edit each part: set Project name to <name>-part-01, -02 ... and press "2. Edit with Claude Code" for each. Then press "Join edited parts".'
+    }
+})
+Add-Label $tR 'parts of' 545 125 55 | Out-Null
+$rMinutes = Add-Text $tR 602 125 35 '8'
+Add-Label $tR 'min' 640 125 30 | Out-Null
+$b = Add-Button $tR 'Join edited parts' 760 125 150
+$b.Add_Click({
+    $base = ($rSlug.Text.Trim() -replace '-part-\d+$', '')
+    if (-not $base) { Msg 'Type the project name the recording was split under.'; return }
+    Run-Py 'Join the edited parts' 'recording.py' @('join', '--slug', $base) {
+        $j = Join-Path $Kit ("video-projects\" + ($rSlug.Text.Trim() -replace '-part-\d+$', '') + '-joined.mp4')
+        if (Test-Path $j) { Start-Process explorer.exe "/select,`"$j`"" }
+    }
+})
+$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit. The transcript and editing decisions go to Claude; ' +
+    'the video files stay here. For recordings over about 15 minutes, split them first: each part edits and renders in far less memory.') 150 348 760
 $nR.Size = New-Object System.Drawing.Size(760, 60)
 
 # ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
@@ -1205,6 +1232,8 @@ Check 'recording tab and house rules' {
     Expect ((Get-RecordingKind) -eq 'long') 'type box does not map to the long edit'
     $rKind.SelectedIndex = 0
     Expect ((Get-RecordingKind) -eq 'short') 'type box does not map to the short edit'
+    Expect ($rTight.Checked -and $rMinutes.Text -eq '8') 'pause removal should be on and parts 8 minutes by default'
+    Expect (('my-talk-part-03' -replace '-part-\d+$', '') -eq 'my-talk') 'part names do not map back to the base name'
     $rSlug.Text = ''
     $rules = Join-Path $smokeDir 'rules.md'
     Expect (Add-HouseRule "  Never   open with a greeting. " $rules) 'rule was not saved'

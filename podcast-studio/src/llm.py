@@ -90,9 +90,26 @@ def pick_model(preferred=DEFAULT_MODEL):
     raise RuntimeError(f"No local chat model is installed. Run: ollama pull {DEFAULT_MODEL}")
 
 
-def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192, schema=None):
-    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage.
+CONTEXT_SIZES = (2048, 4096, 6144, 8192)
 
+
+def context_size(system, user, reply_tokens=1536):
+    """The smallest context window that fits this request.
+
+    The model's working memory for the conversation (its KV cache) grows with the window: for a 4B model a
+    window of 8192 takes about 1 GB of graphics memory, 4096 about half that. On a 4 GB card a needlessly large
+    window pushes part of the model onto the CPU, which is several times slower.
+    """
+    need = (len(system) + len(user)) / 3.2 + reply_tokens      # about 3.2 characters per token for English
+    return next((c for c in CONTEXT_SIZES if c >= need), CONTEXT_SIZES[-1])
+
+
+def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=None, schema=None,
+         keep_alive=0, reply_tokens=1536):
+    """One chat turn.
+
+    keep_alive=0 unloads the model afterwards so the GPU is free for the next stage. Loops that make several
+    calls in a row pass keep_alive="5m" and call unload() when they finish, so the model loads once, not every call.
     `schema` (a JSON schema dict) makes Ollama constrain the reply to that shape; older Ollama
     versions that reject it fall back to plain JSON mode.
     """
@@ -100,9 +117,10 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
     payload = {
         "model": model,
         "stream": False,
-        "keep_alive": 0,
+        "keep_alive": keep_alive,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "options": {"temperature": temperature, "num_ctx": num_ctx},
+        "options": {"temperature": temperature,
+                    "num_ctx": num_ctx or context_size(system, user, reply_tokens)},
     }
     if schema:
         as_json = True
@@ -132,11 +150,36 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
 
 
 def embed(texts, model=EMBED_MODEL, batch=32):
-    """Return a list of embedding vectors (lists of floats)."""
+    """Return a list of embedding vectors (lists of floats). The model stays loaded between batches."""
     ensure_server()
     ensure_model(model)
     vectors = []
     for i in range(0, len(texts), batch):
-        out = _post("/api/embed", {"model": model, "input": texts[i:i + batch], "keep_alive": 0})
+        last = i + batch >= len(texts)
+        out = _post("/api/embed", {"model": model, "input": texts[i:i + batch], "keep_alive": 0 if last else "2m"})
         vectors.extend(out["embeddings"])
     return vectors
+
+
+def unload(model):
+    """Free the graphics memory a model is using (no-op if it is not loaded)."""
+    try:
+        _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def unload_all():
+    """Unload every model Ollama has in memory. Does nothing if Ollama is not running (it is not started)."""
+    if not server_up():
+        return []
+    try:
+        loaded = [m.get("name") or m.get("model") for m in _get("/api/ps").get("models", [])]
+    except Exception:  # noqa: BLE001
+        return []
+    for name in loaded:
+        if name:
+            unload(name)
+    if loaded:
+        log(f"  freed graphics memory held by {', '.join(loaded)}")
+    return loaded

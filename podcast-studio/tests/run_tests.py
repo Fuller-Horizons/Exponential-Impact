@@ -5,6 +5,7 @@
 The language model, voice model and speech-to-text are replaced by small fakes in tests/stubs, so this
 checks the pipeline logic and the real ffmpeg render path - not the quality of the real models.
 """
+import glob
 import json
 import os
 import shutil
@@ -262,6 +263,36 @@ def silence_trimming_rules():
         assert "Do not call ElevenLabs" in text
 
 
+@test
+def model_memory_settings():
+    import llm
+    assert llm.context_size("x" * 400, "y" * 2000) == 4096
+    assert llm.context_size("a", "b", reply_tokens=900) == 2048
+    assert llm.context_size("x" * 6000, "y" * 6000) == 6144
+    assert llm.context_size("x" * 40000, "y" * 40000) == 8192, "never above 8192"
+
+
+@test
+def encoder_choice_and_tags():
+    import common
+    common._encoder.clear()
+    os.environ["PSTUDIO_ENCODER"] = "cpu"
+    try:
+        assert common.encoder()[0] == "x264"
+        args = common.venc(18)
+        assert args[args.index("-crf") + 1] == "18" and "libx264" in args and "comment=pstudio-enc=x264-1" in args
+        assert common.enc_tag() == "pstudio-enc=x264-1"
+    finally:
+        del os.environ["PSTUDIO_ENCODER"]
+        common._encoder.clear()
+    # automatic choice: NVENC only if a real test encode works (there is no NVIDIA card here)
+    kind, _ = common.encoder()
+    assert kind in ("x264", "nvenc")
+    cache = os.path.join(common.studio_root(), "logs", "encoder.json")
+    assert os.path.exists(cache) and "nvenc" in json.load(open(cache)), "the test result is remembered"
+    common._encoder.clear()
+
+
 # ------------------------------------------------------------------ end to end
 WORK = tempfile.mkdtemp(prefix="pstudio_tests_")
 ENV = None
@@ -356,6 +387,11 @@ def e2e_prompt_to_video():
     metrics = json.load(open(os.path.join(PROJECT, "metrics.json"), encoding="utf-8"))
     assert metrics["render"]["duration_ok"] and 20 < metrics["render"]["final_seconds"] < 45, metrics["render"]
     assert metrics["voice"]["lines_retried"] and not metrics["voice"]["lines_still_unclear"], metrics["voice"]
+    assert metrics["render"]["scenes_copied"] >= 4, "scene pictures are reused, not re-encoded"
+    assert "already match - joining without re-encoding" in out
+    import fake_ollama
+    assert fake_ollama.state["ctx"] and max(fake_ollama.state["ctx"]) <= 8192 and min(fake_ollama.state["ctx"]) < 8192
+    assert "5m" in fake_ollama.state["keep"] and "gemma3:4b" in fake_ollama.state["unloaded"], "models are unloaded after use"
     assert metrics["render"]["caption_seconds"] > 0.8 * metrics["render"]["final_seconds"] * 0.9
     assert "\\k" in open(os.path.join(PROJECT, "captions.ass"), encoding="utf-8").read()
     qa = json.load(open(os.path.join(PROJECT, "qa.json"), encoding="utf-8"))
@@ -654,6 +690,125 @@ def youtube_import_command():
 
 
 @test
+def chunked_transcription_and_resume():
+    import common
+    import faster_whisper
+    src = os.path.join(WORK, "long.wav")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=220:d=75", src)
+    cache = os.path.join(WORK, "long.partial.json")
+    os.environ["PSTUDIO_CHUNK_SECONDS"] = "20"
+    try:
+        faster_whisper.CALLS.clear()
+        segs = common.transcribe_words(src, cache=cache)
+        pieces = len(faster_whisper.CALLS)
+        assert pieces >= 3, "a 75 s recording with 20 s pieces is done in several pieces"
+        starts = [s["start"] for s in segs]
+        assert starts == sorted(starts) and len(set(starts)) == len(starts), "no piece is transcribed twice"
+        assert all(b["start"] >= a["end"] - 0.01 for a, b in zip(segs, segs[1:])), "pieces join without overlaps"
+        assert segs[0]["start"] < 1 and segs[-1]["end"] > 74, (segs[0], segs[-1])
+        assert all(w[0] >= s["start"] - 0.01 and w[1] <= s["end"] + 0.01 for s in segs for w in s["words"])
+        state = json.load(open(cache))
+        assert state["next"] >= 74.5 and len(state["segments"]) == len(segs)
+        # an interrupted run carries on: pretend it stopped after 40 s
+        state["segments"] = [s for s in state["segments"] if s["end"] <= 40]
+        state["next"] = 40.0
+        json.dump(state, open(cache, "w"))
+        faster_whisper.CALLS.clear()
+        again = common.transcribe_words(src, cache=cache)
+        assert len(faster_whisper.CALLS) < pieces, "finished pieces are not redone"
+        assert [s["start"] for s in again] == starts, "the resumed transcript matches the full one"
+        # short recordings are done in one go, as before
+        faster_whisper.CALLS.clear()
+        short = os.path.join(WORK, "short.wav")
+        sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=220:d=12", short)
+        common.transcribe_words(short)
+        assert len(faster_whisper.CALLS) == 1
+    finally:
+        del os.environ["PSTUDIO_CHUNK_SECONDS"]
+
+
+@test
+def piece_by_piece_cutting():
+    import recording
+    src = os.path.join(WORK, "cutme.mp4")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=20", "-f", "lavfi", "-i",
+       "sine=f=300:d=20", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", src)
+    out = os.path.join(WORK, "cut.mp4")
+    recording.render_pieces(src, [(1.0, 4.5), (6.0, 6.01), (8.0, 12.0), (15.5, 19.0)], out)
+    info = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name:format=duration", "-of", "csv=p=0", out)
+    assert "video" in info and "aac,audio" in info, info
+    assert abs(float(info.strip().splitlines()[-1]) - 11.0) < 0.15, info
+    keep = os.path.join(WORK, "keep.json")
+    for data in ([[1, 3], [5, 7]], [{"start": 5, "end": 7}, {"start": 1, "end": 3}], {"keep": [[1, 3], [5, 7]]}):
+        json.dump(data, open(keep, "w"))
+        assert recording.read_keep(keep) == [(1.0, 3.0), (5.0, 7.0)]
+    out2 = os.path.join(WORK, "cut2.mp4")
+    log = sh(PY, os.path.join(SRC, "recording.py"), "render", "--video", src, "--keep", keep, "--out", out2, env=ENV)
+    assert "RENDERED" in log and abs(float(sh("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                                               "default=nw=1:nk=1", out2)) - 4.0) < 0.15
+    json.dump({"keep": []}, open(keep, "w"))
+    assert "No kept ranges" in sh(PY, os.path.join(SRC, "recording.py"), "render", "--video", src, "--keep", keep,
+                                  "--out", out2, env=ENV, ok=1)
+    text = recording.prompt("talk", "long", "/ws")
+    assert "recording.py" in text and "render --video" in text and "trim/atrim" in text
+    tight = recording.prompt("talk", "short", "/ws", tightened=True)
+    assert "silenced.mp4" in tight and "skip the cut-silences render" in tight
+
+
+@test
+def split_long_recording_and_join():
+    import recording
+    take = os.path.join(WORK, "Long Talk.mp4")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=330", "-f", "lavfi", "-i",
+       "sine=f=300:d=330", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", take)
+    kit = os.path.join(WORK, "kit2")
+    os.makedirs(kit)
+    open(os.path.join(kit, "CLAUDE.md"), "w").write("kit")
+    env = dict(ENV, PSTUDIO_KIT=kit)
+    out = sh(PY, os.path.join(SRC, "recording.py"), "split", "--recording", take, "--slug", "long-talk", "--minutes", "2",
+             "--tighten", "--workspace", os.path.join(WORK, "ws"), env=env)
+    parts = sorted(glob.glob(os.path.join(kit, "video-projects", "long-talk-part-*")))
+    assert len(parts) == 3 and "PARTS: 3" in out, out
+    total = 0.0
+    for p in parts:
+        raw = os.path.join(p, "assets", "raw.mp4")
+        secs = float(sh("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", raw))
+        total += secs
+        words = json.load(open(os.path.join(p, "assets", "raw.json")))["words"]
+        assert words and words[0]["start"] >= 0 and words[-1]["end"] <= secs + 0.1
+        assert os.path.exists(os.path.join(p, "assets", "silenced.mp4")) and os.path.exists(os.path.join(p, "assets", "silenced.json"))
+        assert "silenced.mp4" in open(os.path.join(p, "prompt-short.txt")).read()
+    assert abs(total - 330) < 1.0, total
+    assert "not been rendered yet" in sh(PY, os.path.join(SRC, "recording.py"), "join", "--slug", "long-talk", env=env, ok=1)
+    for p in parts:                                   # stand in for Claude Code's renders
+        shutil.copy(os.path.join(p, "assets", "raw.mp4"), os.path.join(p, "renders", "edit.mp4"))
+    out = sh(PY, os.path.join(SRC, "recording.py"), "join", "--slug", "long-talk", env=env)
+    joined = os.path.join(kit, "video-projects", "long-talk-joined.mp4")
+    assert "JOINED" in out and abs(float(sh("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                                            "default=nw=1:nk=1", joined)) - 330) < 1.5
+    assert recording.split_points([[0, 1, "a"]], 100.0, 8) == [(0.0, 100.0)], "short recordings are not split"
+
+
+@test
+def working_copies_of_4k_footage():
+    import visuals
+    big = os.path.join(WORK, "big.mp4")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=2560x1440:r=30:d=3", "-f", "lavfi", "-i",
+       "sine=f=300:d=3", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", big)
+    assert visuals.needs_proxy(big) and not visuals.needs_proxy(os.path.join(WORK, "eps", "ep1.mp4"))
+    assert visuals.working_copy(big) == big
+    proxy = visuals.make_proxy(big)
+    size = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", proxy)
+    assert size.strip() == "1920,1080" and visuals.working_copy(big) == proxy
+    assert visuals.make_proxy(big) == proxy, "made once, then reused"
+    assert visuals.make_proxy(os.path.join(WORK, "eps", "ep1.mp4")) is None, "1080p and smaller footage is used as is"
+    out = os.path.join(WORK, "fromproxy.mp4")
+    assert visuals.footage_clip(big, 0.5, out, 1.0, "9:16") in ("center", "single")
+    assert sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of",
+              "csv=p=0", out).strip() == "1080,1920"
+
+
+@test
 def e2e_missing_voice_is_reported():
     bad = os.path.join(WORK, "ws", "projects", "novoice")
     out = sh(PY, os.path.join(SRC, "pipeline.py"), "--project", bad, "--stage", "all", "--prompt", "x",
@@ -724,7 +879,10 @@ def main():
         return 2
     import fake_ollama
     server, url = fake_ollama.start()
-    ENV = dict(os.environ, OLLAMA_HOST_URL=url, PYTHONPATH=os.path.join(HERE, "stubs"), PYTHONIOENCODING="utf-8")
+    # keep logs, caches and working copies inside the test folder, not the repository
+    os.environ.update(PSTUDIO_ROOT=WORK, PSTUDIO_PROXIES=os.path.join(WORK, "proxies"), OLLAMA_HOST_URL=url,
+                      PSTUDIO_YUNET=os.path.join(os.path.dirname(HERE), "models", "face_detection_yunet_2023mar.onnx"))
+    ENV = dict(os.environ, PYTHONPATH=os.path.join(HERE, "stubs"), PYTHONIOENCODING="utf-8")
     print("Podcast Studio tests")
     for fn in TESTS:  # order matters: later end-to-end tests reuse the project made by earlier ones
         run_one(fn)

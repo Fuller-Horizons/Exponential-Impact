@@ -52,6 +52,13 @@ def torch_gpu():
     return f"{p.name}, {p.total_memory / 2 ** 30:.1f} GB, torch {torch.__version__}"
 
 
+def video_encoder():
+    from common import encoder
+    kind, _ = encoder()
+    return ("NVENC: video is encoded on the graphics card's encoder chip, leaving the CPU free" if kind == "nvenc"
+            else "CPU (x264). NVENC is not available or not working; set \"encoder\": \"nvenc\" in settings.json to retry")
+
+
 def face_model():
     import cv2
     import numpy as np
@@ -163,6 +170,8 @@ def main():
     for m in ("cv2", "diffusers", "fal_client", "googleapiclient", "google_auth_oauthlib"):
         check(m, module(m), required=False)
     check("GPU", torch_gpu, required=False)
+    log("Speed")
+    check("video encoder", video_encoder, required=False)
     log("Faces and speakers")
     check("face detector model", face_model)
     check("active-speaker model (LR-ASD)", speaker_model, required=False)

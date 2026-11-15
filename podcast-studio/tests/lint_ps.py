@@ -15,7 +15,7 @@ Add-Type New-Object Join-Path Split-Path Test-Path New-Item Remove-Item Copy-Ite
 Get-ChildItem Select-Object ForEach-Object Where-Object Start-Process Get-Command Out-Null Out-Host ConvertFrom-Json
 ConvertTo-Json Get-Date Write-Host Start-Sleep Get-CimInstance Invoke-RestMethod Invoke-Expression Start-Transcript
 Stop-Transcript Get-PSDrive Sort-Object Measure-Object Write-Output Write-Error Out-File Get-Item Set-Location
-Push-Location Pop-Location
+Push-Location Pop-Location Set-Item
 """.split()}
 
 

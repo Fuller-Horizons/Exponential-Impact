@@ -61,7 +61,8 @@ def rate(cands, model, bible=""):
                 "Rambling, greetings and housekeeping score low. Give each a headline of at most 7 words.\n\n"
                 f"{listing}\n\nReturn JSON: {{\"ratings\": [{{\"id\": <number in brackets>, \"score\": 0-100, \"title\": str}}]}}")
         try:
-            got = llm.chat(system, user, model, schema=SCHEMA, temperature=0.2).get("ratings") or []
+            got = llm.chat(system, user, model, schema=SCHEMA, temperature=0.2, keep_alive="5m",
+                           reply_tokens=900).get("ratings") or []
         except Exception as e:  # noqa: BLE001 - one bad batch should not stop the run
             log(f"  rating failed for passages {at}-{at + len(batch) - 1} ({e})")
             got = []
@@ -74,6 +75,7 @@ def rate(cands, model, bible=""):
             except (KeyError, TypeError, ValueError):
                 continue
         log(f"  rated {min(at + BATCH, len(cands))}/{len(cands)} passages")
+    llm.unload(model)          # free the graphics card before cutting clips
     for c in cands:
         c.setdefault("score", 0)
         c.setdefault("title", "")

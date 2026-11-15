@@ -219,7 +219,7 @@ def stage_script(project, cfg, force):
     t0, best, feedback = time.time(), None, ""
     for attempt in range(3):
         raw = llm.chat(system, base + feedback, cfg["model"], schema=scene_schema(kinds),
-                       temperature=0.6 + 0.1 * attempt)
+                       temperature=0.6 + 0.1 * attempt, keep_alive="5m")
         scenes = clean_scenes(raw, kinds)
         if len(scenes) < 3:
             log(f"  attempt {attempt + 1}: unusable script, retrying")
@@ -233,6 +233,7 @@ def stage_script(project, cfg, force):
         log(f"  attempt {attempt + 1}: would run ~{est:.0f}s, target {target:.0f}s - asking for a rewrite")
         feedback = (f"\n\nYour last draft would run about {est:.0f} seconds. Rewrite it to run about {target:.0f} "
                     f"seconds by {'adding' if est < target else 'cutting'} narration.")
+    llm.unload(cfg["model"])
     if best is None:
         fail("The local model did not produce a usable script. Try another model in the Create tab.")
     est, scenes, title = best
@@ -303,7 +304,9 @@ def stage_voice(project, cfg, force):
     if os.path.exists(txt):
         ref_text = read_text(txt).strip() or None
 
+    from common import free_gpu
     from tts import Voice
+    free_gpu()            # the voice model needs the graphics card; a language model left loaded would not fit
     t0, before = time.time(), gpu_used_mb()
     voice = Voice(ref, ref_text, device=cfg.get("device", "cuda"), language=cfg.get("language", "English"))
     for i, s, wav in todo:
@@ -394,8 +397,17 @@ def stage_render(project, cfg, force):
     kit = brand.load(project)
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
-    enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    from common import enc_tag, probe, venc
+    enc = ["-r", "30", *venc(18), "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    sound = ["-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    copied = 0
+
+    def reusable(vis, secs):
+        """The picture was written by this app at the final size and is long enough: copy it, don't re-encode."""
+        info = probe(vis)
+        v = info.get("video")
+        return (info["tag"] == enc_tag() and v is not None and v[2:6] == (W, H, "yuv420p", "30/1")
+                and info["duration"] >= secs - 0.02)
     clips, words, offset = [], [], 0.0
     for i, s in enumerate(script["scenes"], 1):
         vis = os.path.join(project, "visuals", f"scene_{i:02}.mp4")
@@ -411,17 +423,27 @@ def stage_render(project, cfg, force):
         elif s["visual"] == "soundbite":
             secs = duration(vis)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
-            run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
-                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+            if reusable(vis, secs):
+                run(FF + ["-i", vis, "-filter_complex", f"[0:a]{fades}[a]", "-map", "0:v", "-map", "[a]",
+                          "-t", f"{secs:.3f}", "-c:v", "copy", *sound, "-metadata", f"comment={enc_tag()}", out])
+                copied += 1
+            else:
+                run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
+                          "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         else:
             if not os.path.exists(wav):
                 fail(f"Missing {wav} - run the voice stage first.")
             secs = duration(wav)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.02,afade=t=out:st={max(0, secs - 0.04):.3f}:d=0.04"
-            # hold the last frame if the picture is shorter than the voice line, then cut to the voice
-            run(FF + ["-i", vis, "-i", wav, "-filter_complex",
-                      f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
-                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+            if reusable(vis, secs):
+                run(FF + ["-i", vis, "-i", wav, "-filter_complex", f"[1:a]{fades}[a]", "-map", "0:v", "-map", "[a]",
+                          "-t", f"{secs:.3f}", "-c:v", "copy", *sound, "-metadata", f"comment={enc_tag()}", out])
+                copied += 1
+            else:
+                # hold the last frame if the picture is shorter than the voice line, then cut to the voice
+                run(FF + ["-i", vis, "-i", wav, "-filter_complex",
+                          f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
+                          "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         real = duration(out)
         if s["visual"] == "soundbite":
             exact = s["source"].get("words")
@@ -453,7 +475,9 @@ def stage_render(project, cfg, force):
     run(cmd)
     got = duration(final)
     ok = abs(got - offset) < 1.5
-    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2),
+    if copied:
+        log(f"{copied} scene(s) joined to their sound without re-encoding the picture")
+    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2), scenes_copied=copied,
                   duration_ok=ok, caption_seconds=round(covered, 2))
     log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (scenes total {offset:.1f}s)")
     log(f"FINAL: {final}")

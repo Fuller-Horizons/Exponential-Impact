@@ -4,6 +4,7 @@ Index:  python library.py index <folder-with-videos> --lib <workspace>/library
 Search: python library.py search "topic words" --lib <workspace>/library
 """
 import argparse
+import hashlib
 import math
 import os
 import re
@@ -58,7 +59,14 @@ def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
     return round(start, 2), round(end - start + 0.2, 2), rel, rel_words
 
 
-def index(folder, lib, whisper="small", use_embeddings=True):
+def index(folder, lib, whisper="small", use_embeddings=True, proxies=None):
+    """Transcribe every video in `folder` into the searchable index. Long episodes are done in 10-minute pieces
+    and an interrupted run resumes. Footage larger than 1080p also gets a 1080p working copy (see visuals.make_proxy),
+    unless workspace/settings.json says "proxies": false."""
+    from common import free_gpu, settings
+    if proxies is None:
+        proxies = settings().get("proxies", True) is not False
+    free_gpu()
     ensure_dir(lib)
     path = os.path.join(lib, "index.json")
     data = read_json(path, {"files": {}, "chunks": []})
@@ -77,11 +85,22 @@ def index(folder, lib, whisper="small", use_embeddings=True):
             log(f"[{n}/{len(videos)}] upgrading the index with word timing: {os.path.basename(video)}")
         log(f"[{n}/{len(videos)}] indexing {os.path.basename(video)}")
         data["chunks"] = [c for c in data["chunks"] if c["file"] != video]
-        for start, end, text, segs, words in _chunks(transcribe_words(video, whisper)):
+        partial = os.path.join(lib, "partial", hashlib.sha1(f"{video}|{stamp}".encode("utf-8")).hexdigest()[:16] + ".json")
+        os.makedirs(os.path.dirname(partial), exist_ok=True)
+        for start, end, text, segs, words in _chunks(transcribe_words(video, whisper, cache=partial)):
             data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2),
                                    "text": text, "segs": segs, "words": words})
         data["files"][video] = stamp
         write_json(path, data)  # save after every file so a long run can resume
+        if os.path.exists(partial):
+            os.remove(partial)
+    if proxies:
+        import visuals
+        for video in sorted(videos):
+            try:
+                visuals.make_proxy(video)
+            except Exception as e:  # noqa: BLE001 - a missing working copy only makes later cuts slower
+                log(f"  could not make a working copy of {os.path.basename(video)}: {e}")
 
     if use_embeddings:
         todo = [c for c in data["chunks"] if "vec" not in c]
@@ -155,12 +174,13 @@ def main():
     i.add_argument("--lib", required=True)
     i.add_argument("--whisper", default="small")
     i.add_argument("--no-embeddings", action="store_true")
+    i.add_argument("--no-proxies", action="store_true", help="Do not make 1080p working copies of 4K footage")
     s = sub.add_parser("search")
     s.add_argument("query")
     s.add_argument("--lib", required=True)
     a = ap.parse_args()
     if a.cmd == "index":
-        index(a.folder, a.lib, a.whisper, not a.no_embeddings)
+        index(a.folder, a.lib, a.whisper, not a.no_embeddings, proxies=False if a.no_proxies else None)
     else:
         hit = Library(a.lib).search(a.query)
         log(str(hit and {k: v for k, v in hit.items() if k != "vec"}))

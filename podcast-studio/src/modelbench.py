@@ -31,7 +31,7 @@ def trial(model, target, outline, kinds):
     system, user = pipeline.script_request(outline, target, kinds)
     t0 = time.time()
     try:
-        raw = llm.chat(system, user, model, schema=pipeline.scene_schema(kinds), temperature=0.6)
+        raw = llm.chat(system, user, model, schema=pipeline.scene_schema(kinds), temperature=0.6, keep_alive="5m")
     except Exception as e:  # noqa: BLE001
         return 0.0, time.time() - t0, f"error: {str(e)[:60]}"
     took = time.time() - t0
@@ -70,7 +70,9 @@ def main():
     rows = []
     for m in models:
         log(f"Testing {m}...")
+        trial(m, *OUTLINES[1], kinds)               # warm-up: loading the model should not count against its speed
         runs = [trial(m, target, outline, kinds) for target, outline in OUTLINES]
+        llm.unload(m)
         for points, took, note in runs:
             log(f"   {points:5.1f} points in {took:5.1f}s  ({note})")
         rows.append({"model": m, "score": round(sum(r[0] for r in runs) / len(runs), 1),
