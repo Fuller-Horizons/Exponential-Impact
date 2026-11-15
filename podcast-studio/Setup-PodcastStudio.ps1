@@ -417,6 +417,17 @@ function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
     [System.IO.File]::AppendAllText($file, "- $text`n")
     return $true
 }
+function Get-Connections {
+    # Last saved result of the Settings tab's checks (workspace\connections.json); nothing is connected until checked
+    $f = Join-Path $Work 'connections.json'
+    if (Test-Path $f) { try { return ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json) } catch { } }
+    return [pscustomobject]@{ services = [pscustomobject]@{}; folders = [pscustomobject]@{} }
+}
+function Test-Connected([string]$service) {
+    $c = Get-Connections
+    $entry = $c.services.$service
+    return [bool]($entry -and $entry.connected)
+}
 function Get-ServicesBlock([string]$project, [string]$editor) {
     # The project's service rules (which outside services are allowed, caps, spend so far), added to every agent prompt
     if (-not $project -or -not (Test-Path $Py)) { return '' }
@@ -807,6 +818,12 @@ $lr.Size = New-Object System.Drawing.Size(135, 80)
 Add-Label $tR 'Editor' 10 255 135 | Out-Null
 $rEditor = Add-Combo $tR 10 280 135 @('Claude Code', 'Codex (ChatGPT)')
 function Get-Editor { if ($rEditor.SelectedIndex -eq 1) { return 'codex' } else { return 'claude' } }
+$rEditor.Add_SelectedIndexChanged({
+    if ($rEditor.SelectedIndex -eq 1 -and -not (Test-Connected 'codex')) {
+        $rEditor.SelectedIndex = 0
+        Msg 'Codex is not connected. Connect it in the Settings tab first.'
+    }
+})
 
 function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
 function Get-RecordingProject {
@@ -1191,19 +1208,19 @@ $vWhich = Add-Label $tV '' 410 12 380
 $b = Add-Button $tV 'Load' 800 10 110
 $b.Add_Click({ Load-Services $false })
 $vHigg = New-Object System.Windows.Forms.CheckBox
-$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(120, 24)
+$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(125, 24); $vHigg.Enabled = $false
 $tV.Controls.Add($vHigg)
 Add-Label $tV 'cap' 275 50 30 | Out-Null
 $vHiggCap = Add-Text $tV 305 50 55 '200'
 Add-Label $tV 'credits. Generated B-roll, dubbing, upscaling, reframing.' 365 50 545 | Out-Null
 $vVid = New-Object System.Windows.Forms.CheckBox
-$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(120, 24)
+$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(125, 24); $vVid.Enabled = $false
 $tV.Controls.Add($vVid)
 Add-Label $tV 'cap' 275 85 30 | Out-Null
 $vVidCap = Add-Text $tV 305 85 55 '100'
 Add-Label $tV 'credits. Topic ideas, title scores, thumbnails, music beds.' 365 85 545 | Out-Null
 $vDrive = New-Object System.Windows.Forms.CheckBox
-$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(120, 24)
+$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(125, 24); $vDrive.Enabled = $false
 $tV.Controls.Add($vDrive)
 $vFolder = Add-Text $tV 275 120 515
 $b = Add-Button $tV 'Drive folder...' 800 118 110
@@ -1228,6 +1245,11 @@ function Load-Services([bool]$quiet) {
     $raw = & $Py -u (Join-Path $App 'services.py') json --project $p 2>$null | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $raw.Trim()) { if (-not $quiet) { Msg 'Could not read the service settings.' }; return }
     $c = $raw | ConvertFrom-Json
+    foreach ($pair in @(@($vHigg, 'higgsfield', 'Higgsfield'), @($vVid, 'vidiq', 'vidIQ'), @($vDrive, 'drive', 'Google Drive'))) {
+        $box, $key, $label = $pair
+        $box.Enabled = [bool]$c.available.$key
+        $box.Text = if ($box.Enabled) { $label } else { "$label (not connected)" }
+    }
     $vHigg.Checked = [bool]$c.services.higgsfield; $vVid.Checked = [bool]$c.services.vidiq; $vDrive.Checked = [bool]$c.services.drive
     $vHiggCap.Text = [string]$c.caps.higgsfield; $vVidCap.Text = [string]$c.caps.vidiq; $vFolder.Text = [string]$c.drive_folder
     $vSpent.Text = "Used so far: Higgsfield $($c.spent.higgsfield), vidIQ $($c.spent.vidiq) credits"
@@ -1285,10 +1307,110 @@ $b.Add_Click({
     $f = Join-Path $p 'services-log.md'
     if (Test-Path $f) { Start-Process notepad.exe $f } else { Msg 'No paid service has been used for this project yet.' }
 })
-$nV = Add-Label $tV ('Everything in Podcast Studio works with all of these off, which is the default. Higgsfield and vidIQ are connected to your Claude account, so ' +
+$nV = Add-Label $tV ('Everything works with all of these off, the default. A service can only be ticked once it is connected in the Settings tab. Higgsfield and vidIQ are connected to your Claude account, so ' +
     'only Claude Code can use them; Codex cannot. Caps are instructions Claude follows and logs against, not limits the services enforce. ' +
     'Uploading to a service sends your footage to that company.') 10 355 900
 $nV.Size = New-Object System.Drawing.Size(900, 60)
+
+# ================================================================ TAB: Settings (connect outside services once, for the whole app)
+$tG = New-Tab 'Settings'
+$b = Add-Button $tG 'Check all' 10 10 120
+$b.Add_Click({ Run-Py 'Check every connection' 'connections.py' @('check') { Update-Connections } })
+$gWhen = Add-Label $tG '' 140 14 540
+$script:connRows = @{}
+$connList = @(
+    @('claude', 'Claude Code'), @('higgsfield', 'Higgsfield (via Claude)'), @('vidiq', 'vidIQ (via Claude)'),
+    @('codex', 'Codex (ChatGPT plan)'), @('youtube', 'YouTube upload'), @('drive', 'Google Drive folder'),
+    @('riverside', 'Riverside exports folder'), @('fal', 'fal.ai (cloud video)'), @('ollama', 'Ollama (local model)'))
+$y = 48
+foreach ($item in $connList) {
+    $key, $label = $item
+    Add-Label $tG $label 10 $y 200 | Out-Null
+    $st = Add-Label $tG 'not checked' 215 $y 115
+    $dt = Add-Label $tG '' 335 $y 345
+    $cb = Add-Button $tG 'Connect' 690 ($y - 3) 105; $cb.Tag = $key
+    $cb.Add_Click({ Connect-Service ([string]$this.Tag) })
+    $db = Add-Button $tG 'Disconnect' 800 ($y - 3) 110; $db.Tag = $key
+    $db.Add_Click({ Disconnect-Service ([string]$this.Tag) })
+    if ($key -eq 'ollama') { $cb.Text = 'Check'; $db.Enabled = $false }
+    $script:connRows[$key] = @{ status = $st; detail = $dt }
+    $y += 33
+}
+$b = Add-Button $tG 'Import Riverside session...' 10 352 220
+$b.Add_Click({
+    if (-not (Test-Connected 'riverside')) { Msg 'Connect the Riverside exports folder first (the folder you download separate tracks into).'; return }
+    $d = New-Object System.Windows.Forms.FolderBrowserDialog
+    $d.Description = 'Choose the folder holding ONE session''s separate tracks (one video per person).'
+    $d.SelectedPath = [string](Get-Connections).folders.riverside
+    if ($d.ShowDialog() -ne 'OK') { return }
+    $name = (Split-Path $d.SelectedPath -Leaf) -replace '[^\w\- ]', '-'
+    Run-Py "Import Riverside session '$name'" 'multitrack.py' @('import', '--folder', $d.SelectedPath, '--name', $name,
+        '--episodes', (Join-Path $Work 'episodes'), '--lib', (Join-Path $Work 'library'))
+})
+$gNote = Add-Label $tG ('Connect each service once here. A service that is not connected cannot be ticked in the Services tab or chosen as the editor. ' +
+    'Higgsfield and vidIQ are connected on claude.ai, then checked here through Claude Code; its list can occasionally misreport a connector, so a service can still fail when used.') 240 350 670
+$gNote.Size = New-Object System.Drawing.Size(670, 70)
+
+function Update-Connections {
+    $c = Get-Connections
+    $last = ''
+    foreach ($key in $script:connRows.Keys) {
+        $row = $script:connRows[$key]
+        $e = $c.services.$key
+        if ($e) {
+            $row.status.Text = if ($e.connected) { 'connected' } else { 'not connected' }
+            $row.status.ForeColor = if ($e.connected) { [System.Drawing.Color]::ForestGreen } else { [System.Drawing.Color]::Firebrick }
+            $row.detail.Text = [string]$e.detail
+            if ([string]$e.checked -gt $last) { $last = [string]$e.checked }
+        } else {
+            $row.status.Text = 'not checked'; $row.status.ForeColor = [System.Drawing.SystemColors]::ControlText; $row.detail.Text = ''
+        }
+    }
+    $gWhen.Text = if ($last) { "Last checked $last" } else { 'Not checked yet - press Check all.' }
+}
+function Connect-Service([string]$key) {
+    switch ($key) {
+        'claude' { Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', 'Write-Host "Type /login if Claude Code asks you to sign in, then close this window and press Check all."; claude' }
+        { $_ -in 'higgsfield', 'vidiq' } {
+            Start-Process 'https://claude.ai/settings/connectors'
+            Msg 'Connect it on the claude.ai page that just opened (Settings > Connectors), then press Check all here.'
+        }
+        'codex' {
+            if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { Msg 'Codex is not installed. Re-run the installer with -WithCodex.'; return }
+            Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', 'codex login; Write-Host "Close this window and press Check all."'
+        }
+        'youtube' {
+            $secret = Join-Path $Work 'youtube_client_secret.json'
+            if (-not (Test-Path $secret)) {
+                $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
+                if (-not $f) { Msg 'Choose the OAuth "Desktop app" JSON file from Google Cloud Console (see the Publish tab for the steps).'; return }
+                Copy-Item $f $secret -Force
+            }
+            Run-Py 'Sign in to YouTube (your browser opens)' 'publish.py' @('login', '--project', $Work) { Run-Py 'Check YouTube' 'connections.py' @('check', '--service', 'youtube') { Update-Connections } }
+        }
+        { $_ -in 'drive', 'riverside' } {
+            $d = New-Object System.Windows.Forms.FolderBrowserDialog
+            $d.Description = if ($key -eq 'drive') { 'Choose a folder that Google Drive for desktop syncs (for example G:\Shared drives\...)' } else { 'Choose the folder you download Riverside separate tracks into' }
+            if ($d.ShowDialog() -ne 'OK') { return }
+            Run-Py "Connect $key folder" 'connections.py' @('folder', '--service', $key, '--path', $d.SelectedPath) { Update-Connections }
+        }
+        'fal' { $tabs.SelectedTab = $t3; Msg 'Press "Set fal.ai key" on this tab, then come back and press Check all.' }
+        'ollama' { Run-Py 'Check Ollama' 'connections.py' @('check', '--service', 'ollama') { Update-Connections } }
+    }
+}
+function Disconnect-Service([string]$key) {
+    switch ($key) {
+        'claude' { Msg 'To sign out, type /logout inside Claude Code.' }
+        { $_ -in 'higgsfield', 'vidiq' } { Start-Process 'https://claude.ai/settings/connectors'; Msg 'Disconnect it on claude.ai, then press Check all.' }
+        'codex' { & codex logout 2>$null | Out-Null; Run-Py 'Check Codex' 'connections.py' @('check', '--service', 'codex') { Update-Connections } }
+        'fal' {
+            [Environment]::SetEnvironmentVariable('FAL_KEY', $null, 'User'); Remove-Item Env:FAL_KEY -ErrorAction Ignore
+            Run-Py 'Check fal.ai' 'connections.py' @('check', '--service', 'fal') { Update-Connections }
+        }
+        default { Run-Py "Disconnect $key" 'connections.py' @('clear', '--service', $key) { Update-Connections } }
+    }
+}
+Update-Connections
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab 'Analyze'
@@ -1545,6 +1667,7 @@ $form.Add_Shown({
         if (Get-Command $tool -ErrorAction SilentlyContinue) { Log "  [ok] $tool" } else { Log "  [missing] $tool - re-run setup" }
     }
     if (Test-Path $Py) { Log '  [ok] python venv' } else { Log '  [missing] python venv - re-run setup' }
+    if (-not (Test-Path (Join-Path $Work 'connections.json'))) { Log '  [info] outside services are not connected (optional): Settings tab > Check all' }
     if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
@@ -1586,7 +1709,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 10) "expected 10 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 11) "expected 11 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1723,25 +1846,42 @@ Check 'recording tab and house rules' {
     Show-RuleDialog
     'slug, project path, type and rules file'
 }
+Check 'settings tab shows connection status' {
+    Expect ($script:connRows.Count -eq 9) "expected 9 services, found $($script:connRows.Count)"
+    $f = Join-Path $Work 'connections.json'
+    $had = Test-Path $f
+    $keep = if ($had) { [System.IO.File]::ReadAllText($f) } else { '' }
+    [System.IO.File]::WriteAllText($f, '{"services":{"vidiq":{"connected":true,"detail":"ok","checked":"2099-01-01 10:00"},"codex":{"connected":false,"detail":"no","checked":"2099-01-01 10:00"}},"folders":{}}')
+    Update-Connections
+    Expect ($script:connRows['vidiq'].status.Text -eq 'connected' -and $script:connRows['codex'].status.Text -eq 'not connected') 'status labels are wrong'
+    Expect ($script:connRows['youtube'].status.Text -eq 'not checked') 'unchecked services must say so'
+    Expect ((Test-Connected 'vidiq') -and -not (Test-Connected 'codex') -and -not (Test-Connected 'higgsfield')) 'Test-Connected is wrong'
+    $rEditor.SelectedIndex = 1
+    Expect ($rEditor.SelectedIndex -eq 0) 'Codex must not be selectable while it is not connected'
+    $script:connFileBackup = @{ had = $had; text = $keep }
+    'connected, not connected and not checked shown; Codex blocked'
+}
 Check 'services are off by default and save per project' {
     $vScope.SelectedIndex = 0
     Load-Services $true
     Expect (-not $vHigg.Checked -and -not $vVid.Checked -and -not $vDrive.Checked) 'services must start switched off'
+    Expect ($vVid.Enabled -and -not $vHigg.Enabled -and -not $vDrive.Enabled) 'only connected services can be ticked'
+    Expect ($vHigg.Text -match 'not connected') 'disconnected services must say so'
     $vVid.Checked = $true; $vVidCap.Text = '40'
     Expect (Save-Services $false) 'saving failed'
     $saved = [System.IO.File]::ReadAllText((Join-Path $smokeDir 'services.json')) | ConvertFrom-Json
     Expect ($saved.services.vidiq -and -not $saved.services.higgsfield -and $saved.caps.vidiq -eq 40) 'saved switches are wrong'
     $rules = Get-ServicesBlock $smokeDir 'claude'
-    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: OFF') 'prompt rules do not follow the switches'
+    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: (OFF|NOT CONNECTED)') 'prompt rules do not follow the switches'
     Expect ((Get-ServicesBlock $smokeDir 'codex') -match 'only connected to Claude') 'Codex must be told vidIQ is not available to it'
     $vVid.Checked = $false
     [void](Save-Services $false)
     $out = & $Py -u (Join-Path $App 'services.py') task --project $smokeDir --kind ideas 2>&1 | Out-String
     Expect ($LASTEXITCODE -ne 0 -and $out -match 'is off for this project') 'a task must refuse while its service is off'
-    $rEditor.SelectedIndex = 1
-    Expect ((Get-Editor) -eq 'codex') 'editor box does not map to Codex'
-    $rEditor.SelectedIndex = 0
-    'off by default, saved per project, rules reach the prompt, tasks refuse when off'
+    $f = Join-Path $Work 'connections.json'
+    if ($script:connFileBackup.had) { [System.IO.File]::WriteAllText($f, $script:connFileBackup.text) } else { Remove-Item $f -Force }
+    Update-Connections
+    'off by default, only connected services tickable, saved per project, rules reach the prompt, tasks refuse when off'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'
@@ -2969,14 +3109,44 @@ def _encode(src, start, seconds, out_mp4, graph, sound):
               *venc(20), out_mp4])
 
 
-def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
-    """Cut between the two hosts following who is speaking; the wide/stacked shot when both or neither are."""
+def sidecar(src):
+    """Speaker data written by a multi-track import (multitrack.py), or None."""
+    from common import read_json
+    data = read_json(src + ".speakers.json")
+    return data if isinstance(data, dict) and data.get("boxes") and data.get("timeline") else None
+
+
+def sidecar_shots(data, start, seconds, hold=0.4):
+    """The recorded who-spoke-when for [start, start + seconds], relative to start; very short edges are merged."""
+    end, out = start + seconds, []
+    for a, b, who in data["timeline"]:
+        a, b = max(a, start), min(b, end)
+        if b - a <= 0:
+            continue
+        if out and (b - a < hold or out[-1][2] == who):
+            out[-1][1] = b - start
+        else:
+            out.append([a - start, b - start, who])
+    if len(out) > 1 and out[0][1] - out[0][0] < hold:
+        out[1][0] = 0.0
+        out.pop(0)
+    return [tuple(x) for x in out] or [(0.0, seconds, "both")]
+
+
+def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio, shots=None):
+    """Cut between the people following who is speaking; the wide/stacked shot when both or neither are.
+
+    `shots` comes from a multi-track import's recorded timing; otherwise the LR-ASD model estimates it.
+    """
     import speaker
 
     (W, H), (src_w, src_h) = size, src_size
-    left, right = (boxes[0][0], boxes[0][1]), (boxes[1][0], boxes[1][1])
-    shots = speaker.timeline(src, start, seconds, boxes)
-    both = ("stack", left, right) if H > W else ("wide", left, right)
+    spots = [(b[0], b[1]) for b in boxes]
+    shots = shots or speaker.timeline(src, start, seconds, boxes)
+    if len(spots) == 2:
+        both = ("stack", spots[0], spots[1]) if H > W else ("wide", spots[0], spots[1])
+    else:
+        both = ("wide", None, None)                 # three or four people: the whole grid
     tmp = out_mp4 + ".parts"
     os.makedirs(tmp, exist_ok=True)
     names = []
@@ -2984,8 +3154,9 @@ def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
         t0, t1 = round(t0 * 30) / 30, round(t1 * 30) / 30
         if t1 - t0 < 1 / 30:
             continue
-        layout = both if who == "both" else ("single", (left, right)[who])
-        log(f"  {t0:5.1f}-{t1:5.1f}s  {'both' if who == 'both' else ('left', 'right')[who] + ' host speaking'}")
+        layout = both if who == "both" else ("single", spots[who])
+        label = "everyone" if who == "both" else (("left", "right")[who] + " host" if len(spots) == 2 else f"person {who + 1}")
+        log(f"  {t0:5.1f}-{t1:5.1f}s  {label}{'' if who == 'both' else ' speaking'}")
         name = f"p{n:03}.mp4"
         _encode(src, start + t0, t1 - t0, os.path.join(tmp, name), footage_filter(src_w, src_h, W, H, layout), ["-an"])
         names.append(name)
@@ -3013,6 +3184,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     from common import video_size
 
     W, H = FORMATS[fmt]
+    recorded = sidecar(src)                         # exact speaker timing from a multi-track import
     src = working_copy(src)
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
@@ -3022,13 +3194,17 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     if layout is None:
         if choice not in FRAMINGS:
             choice = "auto"
-        frames = detect_faces(src, start, seconds, samples=10 if choice == "speaker" else 6)
+        if recorded:                                # people sit in known tiles: no need to look for faces
+            frames = [[tuple(b) for b in recorded["boxes"]]] * 6
+        else:
+            frames = detect_faces(src, start, seconds, samples=10 if choice == "speaker" else 6)
         if choice == "speaker":
-            boxes = find_host_boxes(frames)
+            boxes = [tuple(b) for b in recorded["boxes"]] if recorded else find_host_boxes(frames)
             try:
-                if len(boxes) != 2:
+                if len(boxes) < 2:
                     raise RuntimeError("two hosts were not found on screen")
-                shots = _speaker_cut(src, start, seconds, out_mp4, (W, H), (src_w, src_h), boxes, audio)
+                shots = _speaker_cut(src, start, seconds, out_mp4, (W, H), (src_w, src_h), boxes, audio,
+                                     shots=sidecar_shots(recorded, start, seconds) if recorded else None)
                 log(f"  framing: speaker ({shots} shot{'s' if shots != 1 else ''})")
                 return "speaker"
             except Exception as e:  # noqa: BLE001 - never lose the scene over framing
@@ -5155,7 +5331,7 @@ def youtube_service(secrets, token):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["pack", "upload"])
+    ap.add_argument("action", choices=["pack", "upload", "login"])
     ap.add_argument("--project", required=True)
     ap.add_argument("--model", default="gemma3:4b")
     ap.add_argument("--secrets", help="Google OAuth client_secret JSON (desktop app)")
@@ -5164,6 +5340,12 @@ def main():
     project = os.path.abspath(a.project)
     if a.action == "pack":
         pack(project, a.model)
+        return
+    if a.action == "login":                 # Settings tab: sign in once, without uploading anything
+        workspace = os.path.dirname(os.path.dirname(project)) if os.path.basename(os.path.dirname(project)) == "projects" else project
+        youtube_service(a.secrets or os.path.join(workspace, "youtube_client_secret.json"),
+                        a.token or os.path.join(workspace, "youtube_token.json"))
+        log("YOUTUBE: signed in")
         return
     final = os.path.join(project, "final.mp4")
     if not os.path.exists(final):
@@ -5778,16 +5960,31 @@ def _merge(base, extra):
     return base
 
 
-def load(project=None):
-    """Settings in force: all-off defaults, then workspace/settings.json "services", then <project>/services.json."""
+def load(project=None, raw=False):
+    """Settings in force: all-off defaults, then workspace/settings.json "services", then <project>/services.json.
+
+    A service that is not connected on this PC (Settings tab) is reported as off, whatever the project says,
+    unless raw=True. "available" says which services are connected.
+    """
+    import connections
     cfg = _merge(defaults(), (read_json(os.path.join(workspace(), "settings.json"), {}) or {}).get("services_default"))
     if project:
         cfg = _merge(cfg, read_json(os.path.join(project, "services.json"), {}))
+    conn = connections.load()
+    cfg["available"] = {k: connections.connected(k, conn) for k in SERVICES}
+    if not cfg["drive_folder"]:
+        cfg["drive_folder"] = conn["folders"].get("drive", "")
+    if not raw:
+        cfg["services"] = {k: on and cfg["available"][k] for k, on in cfg["services"].items()}
     return cfg
 
 
 def save(project, cfg, as_default=False):
-    data = {"services": cfg["services"], "caps": cfg["caps"], "drive_folder": cfg["drive_folder"]}
+    folder = cfg["drive_folder"]
+    import connections
+    if folder and folder == connections.load()["folders"].get("drive"):
+        folder = ""                        # follow the Settings tab's Drive folder rather than copying it
+    data = {"services": cfg["services"], "caps": cfg["caps"], "drive_folder": folder}
     if as_default:
         path = os.path.join(workspace(), "settings.json")
         settings = read_json(path, {}) or {}
@@ -5818,6 +6015,9 @@ def block(project, editor="claude"):
     lines = ["", "Outside services for this project (set in Podcast Studio's Services tab):"]
     for key, info in SERVICES.items():
         on = cfg["services"][key]
+        if not cfg["available"][key]:
+            lines.append(f"- {info['name']}: NOT CONNECTED on this PC. Do not use it or try to connect it.")
+            continue
         if key == "drive":
             lines.append(f"- {info['name']}: {'on' if on else 'off'} (Podcast Studio copies files itself; you do not need it).")
             continue
@@ -5842,6 +6042,8 @@ def block(project, editor="claude"):
 
 def _require(project, service):
     cfg = load(project)
+    if not cfg["available"].get(service):
+        fail(f"{SERVICES[service]['name']} is not connected. Connect it in the Settings tab first.")
     if not cfg["services"].get(service):
         fail(f"{SERVICES[service]['name']} is off for this project. Turn it on in the Services tab first.")
     return cfg
@@ -5985,15 +6187,19 @@ def main():
         cfg, used = load(project), spent(project)
         for k, info in SERVICES.items():
             extra = f", cap {cfg['caps'][k]}, used {used[k]}" if info["paid"] else f", folder {cfg['drive_folder'] or '-'}"
-            log(f"{info['name']}: {'on' if cfg['services'][k] else 'off'}{extra}")
+            state = ("on" if cfg["services"][k] else "off") if cfg["available"][k] else "not connected"
+            log(f"{info['name']}: {state}{extra}")
     elif a.action == "json":
         import json
         print(json.dumps(dict(load(project), spent=spent(project))))
     elif a.action == "set":
-        cfg = load(project)
+        cfg = load(project, raw=True)
         for k in a.on + a.off:
             if k not in SERVICES:
                 fail(f"Unknown service '{k}'. Use: {', '.join(SERVICES)}")
+        for k in a.on:
+            if not cfg["available"][k]:
+                fail(f"{SERVICES[k]['name']} is not connected. Connect it in the Settings tab first.")
         for k in a.on:
             cfg["services"][k] = True
         for k in a.off:
@@ -6013,6 +6219,401 @@ def main():
         log(f"TASK: {task(project, a.kind, a.scene, a.language)}")
     else:
         drive_copy(project)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['connections.py'] = @'
+"""Which outside services are set up on this PC. Settings tab -> Connect / Disconnect / Check.
+
+  python connections.py check                         check every service and save workspace/connections.json
+  python connections.py folder --service drive|riverside --path <folder>   connect a folder-based service
+  python connections.py clear  --service drive|riverside|youtube|fal       disconnect one
+
+A service that is not connected cannot be switched on for a project (services.py enforces this) and is
+named as unavailable in every agent prompt. Checks are best effort: Claude Code's own connector list is
+known to misreport some connectors, so a service can still fail at the moment it is used.
+"""
+import argparse
+import datetime
+import os
+import shutil
+import subprocess
+
+from common import fail, log, read_json, studio_root, write_json
+
+SERVICES = {
+    "claude": "Claude Code",
+    "higgsfield": "Higgsfield (Claude connector)",
+    "vidiq": "vidIQ (Claude connector)",
+    "codex": "Codex (ChatGPT)",
+    "youtube": "YouTube upload",
+    "drive": "Google Drive folder",
+    "riverside": "Riverside exports folder",
+    "fal": "fal.ai (cloud video)",
+    "ollama": "Ollama (local model)",
+}
+CONNECTOR_PAGE = "https://claude.ai/settings/connectors"
+
+
+def workspace():
+    return os.path.join(studio_root(), "workspace")
+
+
+def path():
+    return os.path.join(workspace(), "connections.json")
+
+
+def load():
+    data = read_json(path(), {}) or {}
+    data.setdefault("services", {})
+    data.setdefault("folders", {})
+    return data
+
+
+def save(data):
+    os.makedirs(workspace(), exist_ok=True)
+    write_json(path(), data)
+
+
+def connected(service, data=None):
+    data = data or load()
+    return bool((data["services"].get(service) or {}).get("connected"))
+
+
+def _run(cmd, timeout=90):
+    exe = shutil.which(cmd[0])
+    if not exe:
+        return None, ""
+    try:
+        done = subprocess.run([exe] + cmd[1:], capture_output=True, text=True, timeout=timeout)
+        return done.returncode, (done.stdout or "") + (done.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, str(e)
+
+
+def parse_mcp_list(text):
+    """Status of the connectors we care about, from `claude mcp list` output.
+
+    Lines look like "claude.ai vidIQ for Claude: https://... - ✔ Connected" or "... - ! Needs authentication"
+    or "... - ✗ Failed to connect". Returns {"higgsfield": (connected, detail), "vidiq": (...)} for those found.
+    """
+    found = {}
+    for line in text.splitlines():
+        low = line.lower()
+        for key in ("higgsfield", "vidiq"):
+            if key in low.replace(" ", "") and key not in found:
+                if "needs auth" in low:
+                    found[key] = (False, "needs sign-in on claude.ai")
+                elif "fail" in low or "✗" in line or "error" in low:
+                    found[key] = (False, "failed to connect")
+                elif "connected" in low or "✓" in line or "✔" in line or "√" in line:
+                    found[key] = (True, "connected through your Claude account")
+                else:
+                    found[key] = (False, "status unknown")
+    return found
+
+
+def check_claude(result):
+    code, out = _run(["claude", "--version"], timeout=30)
+    if code is None:
+        result["claude"] = (False, "not installed")
+        result["higgsfield"] = result["vidiq"] = (False, "needs Claude Code")
+        return
+    code, out = _run(["claude", "mcp", "list"], timeout=120)
+    if code != 0:
+        result["claude"] = (False, "installed; run claude once to sign in")
+        result["higgsfield"] = result["vidiq"] = (False, "needs Claude Code signed in")
+        return
+    signed_in = "claude.ai" in out.lower()
+    result["claude"] = (True, "installed" + (" and signed in" if signed_in else "; sign in to see your connectors"))
+    found = parse_mcp_list(out)
+    for key in ("higgsfield", "vidiq"):
+        result[key] = found.get(key, (False, "not connected on claude.ai"))
+
+
+def check_codex(result):
+    code, out = _run(["codex", "login", "status"], timeout=30)
+    if code is None:
+        result["codex"] = (False, "not installed (installer -WithCodex)")
+    elif code == 0:
+        mode = "ChatGPT plan" if "chatgpt" in out.lower() else "signed in"
+        result["codex"] = (True, f"signed in ({mode})")
+    else:
+        result["codex"] = (False, "installed; not signed in")
+
+
+def check_youtube(result):
+    token = os.path.join(workspace(), "youtube_token.json")
+    secrets = os.path.join(workspace(), "youtube_client_secret.json")
+    if not os.path.exists(secrets):
+        result["youtube"] = (False, "no sign-in file yet")
+        return
+    if not os.path.exists(token):
+        result["youtube"] = (False, "sign-in file saved; not signed in")
+        return
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        creds = Credentials.from_authorized_user_file(token, ["https://www.googleapis.com/auth/youtube.upload"])
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+            with open(token, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+        result["youtube"] = (bool(creds.valid), "signed in" if creds.valid else "sign-in expired")
+    except ImportError:
+        result["youtube"] = (True, "signed in (not re-checked)")
+    except Exception as e:  # noqa: BLE001 - revoked or expired token
+        result["youtube"] = (False, f"sign-in no longer works ({str(e)[:60]})")
+
+
+def check_folder(result, key, data):
+    folder = data["folders"].get(key, "")
+    if not folder:
+        result[key] = (False, "no folder chosen")
+    elif not os.path.isdir(folder):
+        result[key] = (False, f"folder missing: {folder}")
+    elif not os.access(folder, os.W_OK):
+        result[key] = (False, f"cannot write to {folder}")
+    else:
+        result[key] = (True, folder)
+
+
+def check_fal(result):
+    key = os.environ.get("FAL_KEY")
+    result["fal"] = (bool(key), "key saved (checked when used)" if key else "no key")
+
+
+def check_ollama(result):
+    try:
+        import llm
+        if not llm.server_up():
+            result["ollama"] = (False, "not running (it starts when needed)")
+            return
+        names = [m for m in llm.models() if "embed" not in m]
+        result["ollama"] = (bool(names), ", ".join(names[:3]) or "no chat model downloaded")
+    except Exception as e:  # noqa: BLE001
+        result["ollama"] = (False, str(e)[:60])
+
+
+def check(only=None):
+    data = load()
+    result = {}
+    if only in (None, "claude", "higgsfield", "vidiq"):
+        check_claude(result)
+    if only in (None, "codex"):
+        check_codex(result)
+    if only in (None, "youtube"):
+        check_youtube(result)
+    for key in ("drive", "riverside"):
+        if only in (None, key):
+            check_folder(result, key, data)
+    if only in (None, "fal"):
+        check_fal(result)
+    if only in (None, "ollama"):
+        check_ollama(result)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    for key, (ok, detail) in result.items():
+        data["services"][key] = {"connected": ok, "detail": detail, "checked": stamp}
+        log(f"  [{'connected' if ok else 'not connected':13}] {SERVICES[key]}: {detail}")
+    save(data)
+    return data
+
+
+def set_folder(service, folder):
+    if service not in ("drive", "riverside"):
+        fail("Only Google Drive and Riverside are connected with a folder.")
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        fail(f"Folder not found: {folder}")
+    data = load()
+    data["folders"][service] = folder
+    save(data)
+    check(service)
+
+
+def clear(service):
+    data = load()
+    if service in ("drive", "riverside"):
+        data["folders"].pop(service, None)
+    elif service == "youtube":
+        token = os.path.join(workspace(), "youtube_token.json")
+        if os.path.exists(token):
+            os.remove(token)
+    elif service not in SERVICES:
+        fail(f"Unknown service '{service}'.")
+    data["services"][service] = {"connected": False, "detail": "disconnected in Settings",
+                                 "checked": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+    save(data)
+    log(f"{SERVICES[service]} disconnected.")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["check", "folder", "clear"])
+    ap.add_argument("--service")
+    ap.add_argument("--path")
+    a = ap.parse_args()
+    if a.action == "check":
+        check(a.service)
+    elif a.action == "folder":
+        if not (a.service and a.path):
+            fail("folder needs --service and --path")
+        set_folder(a.service, a.path)
+    else:
+        if not a.service:
+            fail("clear needs --service")
+        clear(a.service)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['multitrack.py'] = @'
+"""Import a Riverside session recorded as separate tracks (one video per person) as an indexed episode.
+
+  python multitrack.py import --folder <Riverside download folder> --name my-episode [--episodes DIR --lib DIR]
+
+Riverside records every participant on their own track. This builds one episode video with the people side by
+side (two people) or in a 2x2 grid (three or four), mixes their sound, and works out who is speaking from each
+person's own audio. That timing is exact, unlike guessing from lips in a shared frame, and the app's
+"Active speaker" framing and Highlights use it automatically. Works from downloaded files; no Riverside account
+connection or API is needed.
+"""
+import argparse
+import glob
+import os
+import re
+import subprocess
+import tempfile
+import wave
+
+from common import FF, duration, ensure_dir, fail, log, venc, video_size, write_json
+
+VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
+FPS = 25
+
+
+def speaker_name(path):
+    """'Jonathan_Smith-raw-2026-11-15.mp4' -> 'Jonathan Smith' (drops dates, ids and Riverside suffixes)."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    skip = {"raw", "video", "camera", "cam", "track", "riverside", "audio", "hq"}
+    kept = []
+    for tok in re.split(r"[-_ .]+", stem):
+        if re.fullmatch(r"\d{4}|\d{8}|\d{4}\d{2}\d{2}.*", tok):      # a date: the name has ended
+            break
+        if tok.lower() in skip or re.fullmatch(r"(?=.*\d)[0-9a-f]{6,}", tok, flags=re.I):
+            continue
+        if tok:
+            kept.append(tok)
+    return " ".join(kept) or os.path.basename(path)
+
+
+def find_tracks(folder):
+    files = sorted(f for f in glob.glob(os.path.join(folder, "*")) if f.lower().endswith(VIDEO_EXT)
+                   and video_size(f)[0] > 0)
+    if len(files) < 2:
+        fail(f"Found {len(files)} video track(s) in {folder}. Download the session's separate tracks "
+             "(one video per person) into one folder.")
+    if len(files) > 4:
+        fail("This import handles two to four people. Move extra tracks out of the folder.")
+    return files
+
+
+def tile_layout(n):
+    """(tile width, tile height, [(x, y) per track]) on a 1920x1080 canvas."""
+    if n == 2:
+        return 960, 1080, [(0, 0), (960, 0)]
+    return 960, 540, [(0, 0), (960, 0), (0, 540), (960, 540)][:n]
+
+
+def boxes(n):
+    """Where each person's face sits on the canvas (centre x, centre y, width) for the framing code."""
+    tw, th, spots = tile_layout(n)
+    return [((x + tw / 2) / 1920, (y + th * 0.42) / 1080, tw * 0.35 / 1920) for x, y in spots]
+
+
+def track_levels(path, total):
+    """Loudness of one track every 1/25 s, in dB."""
+    import numpy as np
+    tmp = os.path.join(tempfile.mkdtemp(prefix="pstudio_mt_"), "a.wav")
+    subprocess.run(FF + ["-i", path, "-vn", "-ac", "1", "-ar", "16000", "-t", f"{total:.3f}", "-c:a", "pcm_s16le", tmp],
+                   check=True)
+    with wave.open(tmp, "rb") as w:
+        audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32)
+    os.remove(tmp)
+    hop = 16000 // FPS
+    frames = len(audio) // hop
+    if frames == 0:
+        return np.zeros(int(total * FPS)) - 90
+    rms = np.sqrt((audio[:frames * hop].reshape(frames, hop) ** 2).mean(axis=1) + 1e-9)
+    return 20 * np.log10(rms / 32768 + 1e-9)
+
+
+def speaking_scores(levels):
+    """Per-track scores for speaker.smooth_timeline: above 0 = this person is talking.
+
+    Each track's own quiet level is its 20th percentile; speech is 12 dB or more above it. Microphones also pick
+    up the other people a little, so a track only counts when it is the loudest relative to its own floor.
+    """
+    import numpy as np
+    n = min(len(lv) for lv in levels)
+    rel = [lv[:n] - np.percentile(lv[:n], 20) for lv in levels]
+    return [(r - 12.0) / 6.0 for r in rel]
+
+
+def import_session(folder, name, episodes, lib=None):
+    import numpy as np
+    import speaker
+
+    if not re.match(r"^[\w\- ]+$", name):
+        fail("Use letters, digits, spaces and dashes for the episode name.")
+    tracks = find_tracks(folder)
+    names = [speaker_name(t) for t in tracks]
+    total = max(duration(t) for t in tracks)
+    tw, th, spots = tile_layout(len(tracks))
+    log(f"{len(tracks)} people: {', '.join(names)} ({total / 60:.1f} minutes)")
+    out = os.path.join(ensure_dir(episodes), f"{name}.mp4")
+    inputs, parts = [], []
+    for i, t in enumerate(tracks):
+        inputs += ["-i", t]
+        parts.append(f"[{i}:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1,fps=30,"
+                     f"tpad=stop_mode=clone:stop_duration={total:.3f}[v{i}]")
+    layout = "|".join(f"{x}_{y}" for x, y in spots)
+    graph = ";".join(parts) + ";" + "".join(f"[v{i}]" for i in range(len(tracks)))
+    graph += f"xstack=inputs={len(tracks)}:layout={layout}:fill=black,format=yuv420p[v];"
+    graph += "".join(f"[{i}:a]" for i in range(len(tracks)))
+    graph += f"amix=inputs={len(tracks)}:duration=longest:normalize=0,alimiter=limit=0.95[a]"
+    log("Building the episode video (one time; about as long as the session on a 4-core PC)...")
+    subprocess.run(FF + inputs + ["-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
+                                  *venc(20), "-g", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                                  out + ".part.mp4"], check=True)
+    os.replace(out + ".part.mp4", out)
+    log("Working out who speaks when, from each person's own track...")
+    levels = [track_levels(t, total) for t in tracks]
+    shots = speaker.smooth_timeline(speaking_scores(levels), total)
+    talk = {names[w]: round(sum(b - a for a, b, who in shots if who == w), 1) for w in range(len(tracks))}
+    write_json(out + ".speakers.json", {"speakers": names, "boxes": [list(map(float, b)) for b in boxes(len(tracks))],
+                                        "timeline": [[round(a, 2), round(b, 2), w] for a, b, w in shots],
+                                        "source": [os.path.abspath(t) for t in tracks]})
+    log("Talking time: " + ", ".join(f"{k} {v / 60:.1f} min" for k, v in talk.items()))
+    if lib:
+        import library
+        library.index(os.path.dirname(out), lib)
+    log(f"EPISODE: {out}")
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["import"])
+    ap.add_argument("--folder", required=True)
+    ap.add_argument("--name", required=True)
+    ap.add_argument("--episodes", required=True)
+    ap.add_argument("--lib")
+    a = ap.parse_args()
+    import_session(os.path.abspath(a.folder), a.name.strip(), os.path.abspath(a.episodes), a.lib)
 
 
 if __name__ == "__main__":
@@ -6445,6 +7046,11 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Assemble by hand: `python ..\app\assemble.py --clips a.mp4 b.mp4 --voice v.wav --format 9:16 --captions --out output\final.mp4`
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
+
+## Connections (Settings tab)
+- `python ..\app\connections.py check` saves which services are connected in `connections.json`. A service that is not connected must not be used.
+- Riverside separate tracks: `python ..\app\multitrack.py import --folder <tracks> --name <episode> --episodes episodes --lib library`
+  writes `<episode>.mp4` plus `<episode>.mp4.speakers.json` (who speaks when, from each person's own audio), used by Active speaker framing.
 
 ## Outside services (optional, per project)
 - Before using Higgsfield, vidIQ or any other outside service, read the project's rules: `python ..\app\services.py block --project <project folder>`.
