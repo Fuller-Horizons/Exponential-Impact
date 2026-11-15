@@ -949,7 +949,7 @@ def riverside_separate_tracks():
     host, guest = names.index("Jonathan Smith"), names.index("Guest Person")
     tl = [(a, b, w) for a, b, w in side["timeline"]]
     talking = {w: sum(b - a for a, b, x in tl if x == w) for w in (host, guest)}
-    assert 3.0 < talking[host] < 5.5 and 3.0 < talking[guest] < 5.5, tl
+    assert 3.0 < talking[host] < 6.5 and 3.0 < talking[guest] < 6.5, tl   # short silences join the nearest shot
     assert next(w for a, b, w in tl if a <= 2 < b) == host and next(w for a, b, w in tl if a <= 7 < b) == guest, tl
     # framing uses the recorded timing, not face detection
     clip = os.path.join(WORK, "rs-speaker.mp4")
