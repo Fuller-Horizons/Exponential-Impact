@@ -10,17 +10,22 @@ Download `Setup-PodcastStudio.ps1`, then in a normal PowerShell window:
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Setup-PodcastStudio.ps1"
 ```
 
-Options: `-Root D:\PodcastStudio`, `-Model gemma3:4b`, `-WithStills`, `-SkipModels`, `-SkipClaude`, `-CpuOnly`, `-Upgrade`.
+Options: `-Root D:\PodcastStudio`, `-Model gemma3:4b`, `-WithStills`, `-SkipModels`, `-SkipClaude`, `-CpuOnly`, `-Upgrade`,
+and `-CheckOnly` to inspect the PC and network without installing. Every run saves `logs\install-<time>.log`.
 The installer ends with a self-test and writes `logs\selftest.json`.
 
 ## Create tab: prompt to video
 1. **Index footage** once: point it at the folder of episode videos.
 2. Type the topic, press **Draft outline**. A local language model (Ollama) writes it.
 3. Edit the outline, press **Approve + make video**. Stages: script and shot list, cloned voice per scene,
-   a visual per scene (matching episode footage, text card, or optional AI still), then render with captions.
+   a visual per scene, render, then a quality gate. Scene types: a real soundbite from an episode (own sound,
+   up to two per video), silent episode footage cropped around the speaker's face, a text card, or an optional
+   AI still. Captions highlight word by word; audio is normalised and music is lowered under speech.
 4. If a stage fails, press step 2 again: finished work is kept. Editing the outline rebuilds everything after it.
 
-Each video lives in `workspace\projects\<name>\`; `metrics.json` records timings and peak VRAM.
+Each video lives in `workspace\projects\<name>\`; `metrics.json` records timings and peak VRAM, and
+`qa.json` holds the quality report. **Build style bible (local)** in the Analyze tab writes
+`workspace\style-bible.md` from the indexed episodes; the outline and script steps read it.
 
 ## Other tabs
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
@@ -31,4 +36,6 @@ Upstream repos are checked out at fixed commits and Python packages are pinned; 
 `requirements.lock` and re-runs reuse it. `-Upgrade` moves to the latest.
 
 ## Development
-Edit files in `src/` or `installer.template.ps1`, then run `python build.py` to regenerate the installer.
+Edit files in `src/` or `installer.template.ps1`, then run `python build.py`. It runs `tests/run_tests.py`
+(unit tests plus a full prompt-to-video run with stand-ins for the AI models, and a static PowerShell
+syntax check) and only then regenerates the installer.

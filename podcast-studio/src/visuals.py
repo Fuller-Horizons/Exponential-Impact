@@ -80,15 +80,75 @@ def card_clip(text, out_mp4, seconds, fmt="9:16", kicker=None):
     return kenburns(png, out_mp4, seconds, fmt, zoom=0.05)
 
 
-def footage_clip(src, start, out_mp4, seconds, fmt="9:16"):
-    """Cut `seconds` of real footage from `src` at `start`, cropped to fill the frame, muted."""
+def face_center(src, start, seconds, samples=5):
+    """Median horizontal/vertical centre (0-1) of the largest face across a few frames, or None.
+
+    Runs on the CPU with OpenCV's bundled detector. With two people in frame it follows the larger face.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+    cap = cv2.VideoCapture(src)
+    if cascade.empty() or not cap.isOpened():
+        return None
+    xs, ys = [], []
+    for i in range(samples):
+        cap.set(cv2.CAP_PROP_POS_MSEC, (start + seconds * (i + 0.5) / samples) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        h, w = frame.shape[:2]
+        scale = 640.0 / w if w > 640 else 1.0
+        gray = cv2.cvtColor(cv2.resize(frame, (int(w * scale), int(h * scale))), cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                         minSize=(int(gray.shape[0] * 0.08),) * 2)
+        if len(faces):
+            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+            xs.append((x + fw / 2) / gray.shape[1])
+            ys.append((y + fh / 2) / gray.shape[0])
+    cap.release()
+    if len(xs) < 2:
+        return None
+    xs.sort(), ys.sort()
+    return xs[len(xs) // 2], ys[len(ys) // 2]
+
+
+def crop_offsets(src_w, src_h, W, H, center=None):
+    """Scale-to-cover size and crop origin that keep `center` (0-1 fractions) in frame."""
+    f = max(W / src_w, H / src_h)
+    sw, sh = int(round(src_w * f / 2)) * 2, int(round(src_h * f / 2)) * 2
+    cx, cy = center or (0.5, 0.5)
+    if not center:
+        cy = 0.5
+    else:
+        cy = min(0.5, cy + 0.1)  # keep faces in the upper part, with room for captions
+    x = int(min(max(cx * sw - W / 2, 0), max(sw - W, 0)))
+    y = int(min(max(cy * sh - H / 2, 0), max(sh - H, 0)))
+    return sw, sh, x, y
+
+
+def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False):
+    """Cut `seconds` of real footage at `start`, cropped around the speaker's face. Muted unless `audio`."""
+    from common import video_size
+
     W, H = FORMATS[fmt]
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
-    vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,format=yuv420p,setsar=1"
-    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src, "-vf", vf, "-an",
+    sw_, sh_ = video_size(src)
+    center = face_center(src, start, seconds) if sw_ else None
+    if center:
+        log(f"  face at {center[0]:.2f},{center[1]:.2f} - cropping around it")
+    if sw_:
+        sw, sh, x, y = crop_offsets(sw_, sh_, W, H, center)
+        vf = f"scale={sw}:{sh},crop={W}:{H}:{x}:{y},fps=30,format=yuv420p,setsar=1"
+    else:
+        vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,format=yuv420p,setsar=1"
+    sound = ["-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
+    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src, "-vf", vf, *sound,
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
-    if duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
+    if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
                   "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", padded])

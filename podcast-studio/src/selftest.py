@@ -137,7 +137,7 @@ def main():
     log("Python packages")
     for m in ("torch", "faster_whisper", "qwen_tts", "PIL", "soundfile"):
         check(m, module(m))
-    for m in ("diffusers", "fal_client"):
+    for m in ("cv2", "diffusers", "fal_client"):
         check(m, module(m), required=False)
     check("GPU", torch_gpu, required=False)
     log("Local language model")

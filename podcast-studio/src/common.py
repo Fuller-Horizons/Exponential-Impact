@@ -61,6 +61,17 @@ def duration(path):
         return 0.0
 
 
+def video_size(path):
+    """(width, height) of the first video stream, or (0, 0)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height", "-of", "csv=p=0:s=x", path], capture_output=True, text=True)
+    try:
+        w, h = out.stdout.strip().split("x")[:2]
+        return int(w), int(h)
+    except ValueError:
+        return 0, 0
+
+
 def gpu_used_mb():
     """GPU memory in use right now (MiB) from nvidia-smi, or None."""
     try:

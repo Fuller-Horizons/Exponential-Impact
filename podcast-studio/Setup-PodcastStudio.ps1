@@ -10,6 +10,8 @@
   Run (normal PowerShell window, not admin):
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-PodcastStudio.ps1
   Options: -Root D:\PodcastStudio  -Model gemma3:4b  -SkipModels  -SkipClaude  -CpuOnly  -WithStills  -Upgrade
+           -CheckOnly   (look at this PC and the network, install nothing)
+  A full log of every run is saved to <Root>\logs\install-<time>.log.
   Safe to re-run. Versions are pinned: a re-run reinstalls the exact set recorded in requirements.lock
   unless you pass -Upgrade.
 #>
@@ -20,7 +22,8 @@ param(
     [switch]$SkipClaude,
     [switch]$CpuOnly,
     [switch]$WithStills,
-    [switch]$Upgrade
+    [switch]$Upgrade,
+    [switch]$CheckOnly
 )
 # Pinned upstream versions (verified to resolve together for Windows / Python 3.11)
 $Pins = @{
@@ -28,10 +31,30 @@ $Pins = @{
     'Qwen3-TTS'    = @{ repo = 'QwenLM/Qwen3-TTS';           sha = '022e286b98fbec7e1e916cb940cdf532cd9f488e' }
 }
 $PyPins = 'faster-whisper==1.2.1', 'diffusers==0.39.0', 'pillow==13.0.0', 'fal-client==1.0.3',
-          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6'
+          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6', 'opencv-python-headless==4.12.0.88'
+$ModelFallbacks = 'gemma3:4b', 'qwen3:4b', 'phi4-mini', 'llama3.2:3b'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
+$logName = 'install-' + $started.ToString('yyyyMMdd-HHmmss') + '.log'
+$tempLog = Join-Path $env:TEMP "PodcastStudio-$logName"
+try { Start-Transcript -Path $tempLog -Force | Out-Null } catch { }
+function Save-Log {
+    try { Stop-Transcript | Out-Null } catch { }
+    try {
+        $dir = Join-Path $Root 'logs'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Copy-Item $tempLog (Join-Path $dir $logName) -Force
+        Write-Host "Log saved: $(Join-Path $dir $logName)"
+    } catch { Write-Host "Log saved: $tempLog" }
+}
+trap {
+    Write-Host "`nINSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "At: $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
+    Save-Log
+    Write-Host 'Fix the problem above and run this script again - finished steps are skipped or quick.' -ForegroundColor Yellow
+    exit 1
+}
 
 function Step([string]$m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Ok([string]$m)   { Write-Host "    [ok] $m" -ForegroundColor Green }
@@ -56,15 +79,40 @@ function Native([string]$what, [scriptblock]$cmd, [switch]$Soft) {
 Step 'Checking this PC'
 if (-not (Has 'winget')) { throw "winget is missing. Install 'App Installer' from the Microsoft Store, then re-run." }
 if (Has 'nvidia-smi') {
-    $gpu = (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader) -join '; '
+    $gpu = (& nvidia-smi '--query-gpu=name,memory.total,driver_version' '--format=csv,noheader') -join '; '
     Ok "GPU: $gpu"
 } else {
     Warn 'nvidia-smi not found: update the NVIDIA driver for GPU voice cloning. Continuing (CPU works, slower).'
 }
-$ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+$gb = 1024 * 1024 * 1024
+$ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / $gb)
 Ok "RAM: $ramGb GB"
 $drive = Get-PSDrive -Name ($Root.Substring(0, 1))
-if ($drive.Free -lt 25GB) { Warn ("Only {0:N0} GB free on {1}: - need ~20 GB (PyTorch + models)." -f ($drive.Free / 1GB), $drive.Name) }
+$freeGb = [math]::Round($drive.Free / $gb)
+if ($freeGb -lt 25) { Warn "Only $freeGb GB free on drive $($drive.Name) - need about 20 GB (PyTorch + models)." } else { Ok "Disk: $freeGb GB free" }
+
+Step 'Checking the network (hosts the installer downloads from)'
+$hosts = [ordered]@{ 'github.com' = 'code'; 'pypi.org' = 'Python packages'; 'download.pytorch.org' = 'PyTorch';
+                     'huggingface.co' = 'voice and speech models'; 'ollama.com' = 'language model' }
+foreach ($h in $hosts.Keys) {
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $ok = $c.BeginConnect($h, 443, $null, $null).AsyncWaitHandle.WaitOne(4000) -and $c.Connected
+        $c.Close()
+    } catch { $ok = $false }
+    if ($ok) { Ok "$h ($($hosts[$h]))" } else { Warn "cannot reach $h - needed for $($hosts[$h])" }
+}
+if ($CheckOnly) {
+    Step 'Already installed'
+    foreach ($c in 'git', 'python', 'py', 'node', 'ffmpeg', 'yt-dlp', 'deno', 'ollama', 'claude') {
+        if (Has $c) { Ok $c } else { Write-Host "    [  ] $c (will be installed)" }
+    }
+    if (Test-Path (Join-Path $Root 'venv\Scripts\python.exe')) { Ok "existing install at $Root" } else { Write-Host "    [  ] no install at $Root yet" }
+    Write-Host "`nCheck only - nothing was installed. Run again without -CheckOnly to install." -ForegroundColor Green
+    try { Stop-Transcript | Out-Null } catch { }
+    Write-Host "Log saved: $tempLog"
+    exit 0
+}
 
 # ------------------------------------------------------------------ 2. system tools
 Step 'Installing system tools (winget)'
@@ -170,7 +218,14 @@ if (-not $SkipModels) {
             }
         }
         if ($up) {
-            Native "ollama pull $Model" { & ollama pull $Model } -Soft | Out-Null
+            $got = $null
+            foreach ($m in (@($Model) + $ModelFallbacks | Select-Object -Unique)) {
+                if (Native "ollama pull $m" { & ollama pull $m } -Soft) { $got = $m; break }
+            }
+            if ($got) {
+                if ($got -ne $Model) { Warn "$Model was not available - using $got instead"; $Model = $got }
+                Ok "language model: $Model"
+            } else { Warn 'No language model could be downloaded. Later, run: ollama pull <model name>' }
             Native 'ollama pull nomic-embed-text' { & ollama pull nomic-embed-text } -Soft | Out-Null
         } else { Warn 'Ollama did not start - open the Ollama app, then re-run this script.' }
     } else { Warn 'Ollama not on PATH yet - open a new PowerShell window and re-run.' }
@@ -200,7 +255,8 @@ $files = [ordered]@{}
 $files['PodcastStudio.ps1'] = @'
 # Podcast Studio - local GUI: prompt -> outline -> script -> voice -> visuals -> video (all on this PC)
 # Windows PowerShell 5.1+.  Launch:  powershell -ExecutionPolicy Bypass -File PodcastStudio.ps1
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $Root   = Split-Path $PSScriptRoot -Parent
@@ -445,7 +501,7 @@ $b.Add_Click({
 })
 Add-Label $t0 'Outline (editable)' 10 220 | Out-Null
 $cOutline = Add-Text $t0 150 220 760 '' 185
-$n0 = Add-Label $t0 'Runs fully on this PC: Ollama writes the outline and script, Qwen3-TTS speaks it, visuals come from your indexed episodes, text cards and optional AI stills. A failed run resumes: press step 2 again.' 150 408 760
+$n0 = Add-Label $t0 'Runs fully on this PC: a local model writes the outline and script, your cloned voice narrates, and scenes use real soundbites and footage from your indexed episodes, text cards and optional AI stills. Ends with a quality report (qa.json). A failed run resumes: press step 2 again.' 150 408 760
 $n0.Size = New-Object System.Drawing.Size(760, 34)
 
 # ================================================================ TAB 1: Analyze
@@ -486,13 +542,16 @@ $b.Add_Click({
         Run-Py 'Transcribe' 'captions.py' @($src, '--model', $aWhisper.Text, '--out', (Join-Path $Work "analysis\$name"))
     }
 })
-$b = Add-Button $t1 'Ask Claude: build style bible' 490 140 230
+$b = Add-Button $t1 'Build style bible (local)' 490 140 230
 $b.Add_Click({
-    $prompt = 'Read everything in analysis/ (frames, transcripts) and CLAUDE.md. Write style-bible.md describing this podcast: hosts, voice and tone, recurring topics, hook patterns, pacing and cut rhythm, caption style, typical short-form length, and 10 example hooks. Then list 5 new short-video ideas in that style.'
-    Start-Process powershell.exe -WorkingDirectory $Work -ArgumentList '-NoExit', '-Command', ("claude " + (Q $prompt))
+    if (-not (Test-Path (Join-Path $Work 'library\index.json'))) { Msg 'Index your episodes first (Create tab > Index footage).'; return }
+    $script:ctx = @{ out = (Join-Path $Work 'style-bible.md') }
+    Run-Py 'Build style bible (local model)' 'stylebible.py' @('--lib', (Join-Path $Work 'library'), '--out', $script:ctx.out, '--model', $cModel.Text) {
+        if (Test-Path $script:ctx.out) { Start-Process notepad.exe $script:ctx.out }
+    }
 })
 $note = Add-Label $t1 ("Tips: 'balanced' samples scene changes. For a 45-min episode, analyse 5-10 min windows with Start/End. " +
-    "Output lands in workspace\analysis. The style bible step opens Claude Code in the workspace.") 10 190 900
+    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 190 900
 $note.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 2: Voice
@@ -783,6 +842,17 @@ def duration(path):
         return 0.0
 
 
+def video_size(path):
+    """(width, height) of the first video stream, or (0, 0)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height", "-of", "csv=p=0:s=x", path], capture_output=True, text=True)
+    try:
+        w, h = out.stdout.strip().split("x")[:2]
+        return int(w), int(h)
+    except ValueError:
+        return 0, 0
+
+
 def gpu_used_mb():
     """GPU memory in use right now (MiB) from nvidia-smi, or None."""
     try:
@@ -877,6 +947,7 @@ from common import log
 
 HOST = os.environ.get("OLLAMA_HOST_URL", "http://127.0.0.1:11434")
 DEFAULT_MODEL = "gemma3:4b"
+FALLBACK_MODELS = ["gemma3:4b", "qwen3:4b", "phi4-mini", "llama3.2:3b"]
 EMBED_MODEL = "nomic-embed-text"
 
 
@@ -933,10 +1004,36 @@ def ensure_model(name):
     subprocess.run(["ollama", "pull", name], check=True)
 
 
-def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192):
-    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage."""
+def _installed(name, have):
+    return name in have or (":" not in name and name + ":latest" in have)
+
+
+def pick_model(preferred=DEFAULT_MODEL):
+    """Return a usable chat model: the preferred one, else pull it, else any installed fallback."""
     ensure_server()
-    ensure_model(model)
+    have = models()
+    if _installed(preferred, have):
+        return preferred
+    try:
+        ensure_model(preferred)
+        return preferred
+    except Exception as e:  # unknown name, offline...
+        log(f"Could not get model {preferred} ({e}).")
+    chat_models = [h for h in have if "embed" not in h]
+    for cand in FALLBACK_MODELS + chat_models:
+        if _installed(cand, have):
+            log(f"Using installed model {cand} instead.")
+            return cand
+    raise RuntimeError(f"No local chat model is installed. Run: ollama pull {DEFAULT_MODEL}")
+
+
+def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192, schema=None):
+    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage.
+
+    `schema` (a JSON schema dict) makes Ollama constrain the reply to that shape; older Ollama
+    versions that reject it fall back to plain JSON mode.
+    """
+    model = pick_model(model)
     payload = {
         "model": model,
         "stream": False,
@@ -944,10 +1041,19 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "options": {"temperature": temperature, "num_ctx": num_ctx},
     }
-    if as_json:
+    if schema:
+        as_json = True
+        payload["format"] = schema
+    elif as_json:
         payload["format"] = "json"
     try:
-        out = _post("/api/chat", payload)
+        try:
+            out = _post("/api/chat", payload)
+        except urllib.error.HTTPError as e:
+            if not (schema and e.code == 400):
+                raise
+            payload["format"] = "json"
+            out = _post("/api/chat", payload)
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Ollama error {e.code}: {e.read().decode('utf-8', 'ignore')[:300]}")
     text = out.get("message", {}).get("content", "").strip()
@@ -990,18 +1096,37 @@ WINDOW = 20.0  # seconds of speech per searchable chunk
 
 
 def _chunks(segs):
+    """Group transcript segments into ~20 s chunks: (start, end, text, [segments])."""
     out, cur = [], None
     for start, end, text in segs:
+        seg = [round(start, 2), round(end, 2), text]
         if cur is None:
-            cur = [start, end, text]
+            cur = [start, end, text, [seg]]
         elif end - cur[0] <= WINDOW:
             cur[1], cur[2] = end, cur[2] + " " + text
+            cur[3].append(seg)
         else:
             out.append(tuple(cur))
-            cur = [start, end, text]
+            cur = [start, end, text, [seg]]
     if cur:
         out.append(tuple(cur))
     return out
+
+
+def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
+    """Choose a 4-10 s spoken passage inside a chunk. Returns (start, seconds, [(rel_start, rel_end, text)])."""
+    segs = chunk.get("segs") or [[chunk["start"], chunk["end"], chunk["text"]]]
+    qw = set(_words(query))
+    best = max(range(len(segs)), key=lambda i: (len(qw & set(_words(segs[i][2]))), -i))
+    start, end, picked = segs[best][0], segs[best][1], [segs[best]]
+    for seg in segs[best + 1:]:
+        if end - start >= min_s or seg[1] - start > max_s:
+            break
+        picked.append(seg)
+        end = seg[1]
+    end = min(end, start + max_s)
+    rel = [(max(0.0, a - start), min(b, end) - start, t) for a, b, t in picked if a < end]
+    return start, round(end - start + 0.15, 2), rel
 
 
 def index(folder, lib, whisper="small", use_embeddings=True):
@@ -1020,8 +1145,9 @@ def index(folder, lib, whisper="small", use_embeddings=True):
             continue
         log(f"[{n}/{len(videos)}] indexing {os.path.basename(video)}")
         data["chunks"] = [c for c in data["chunks"] if c["file"] != video]
-        for start, end, text in _chunks(transcribe(video, whisper)):
-            data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2), "text": text})
+        for start, end, text, segs in _chunks(transcribe(video, whisper)):
+            data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2),
+                                   "text": text, "segs": segs})
         data["files"][video] = stamp
         write_json(path, data)  # save after every file so a long run can resume
 
@@ -1188,15 +1314,75 @@ def card_clip(text, out_mp4, seconds, fmt="9:16", kicker=None):
     return kenburns(png, out_mp4, seconds, fmt, zoom=0.05)
 
 
-def footage_clip(src, start, out_mp4, seconds, fmt="9:16"):
-    """Cut `seconds` of real footage from `src` at `start`, cropped to fill the frame, muted."""
+def face_center(src, start, seconds, samples=5):
+    """Median horizontal/vertical centre (0-1) of the largest face across a few frames, or None.
+
+    Runs on the CPU with OpenCV's bundled detector. With two people in frame it follows the larger face.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+    cap = cv2.VideoCapture(src)
+    if cascade.empty() or not cap.isOpened():
+        return None
+    xs, ys = [], []
+    for i in range(samples):
+        cap.set(cv2.CAP_PROP_POS_MSEC, (start + seconds * (i + 0.5) / samples) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        h, w = frame.shape[:2]
+        scale = 640.0 / w if w > 640 else 1.0
+        gray = cv2.cvtColor(cv2.resize(frame, (int(w * scale), int(h * scale))), cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                         minSize=(int(gray.shape[0] * 0.08),) * 2)
+        if len(faces):
+            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+            xs.append((x + fw / 2) / gray.shape[1])
+            ys.append((y + fh / 2) / gray.shape[0])
+    cap.release()
+    if len(xs) < 2:
+        return None
+    xs.sort(), ys.sort()
+    return xs[len(xs) // 2], ys[len(ys) // 2]
+
+
+def crop_offsets(src_w, src_h, W, H, center=None):
+    """Scale-to-cover size and crop origin that keep `center` (0-1 fractions) in frame."""
+    f = max(W / src_w, H / src_h)
+    sw, sh = int(round(src_w * f / 2)) * 2, int(round(src_h * f / 2)) * 2
+    cx, cy = center or (0.5, 0.5)
+    if not center:
+        cy = 0.5
+    else:
+        cy = min(0.5, cy + 0.1)  # keep faces in the upper part, with room for captions
+    x = int(min(max(cx * sw - W / 2, 0), max(sw - W, 0)))
+    y = int(min(max(cy * sh - H / 2, 0), max(sh - H, 0)))
+    return sw, sh, x, y
+
+
+def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False):
+    """Cut `seconds` of real footage at `start`, cropped around the speaker's face. Muted unless `audio`."""
+    from common import video_size
+
     W, H = FORMATS[fmt]
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
-    vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,format=yuv420p,setsar=1"
-    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src, "-vf", vf, "-an",
+    sw_, sh_ = video_size(src)
+    center = face_center(src, start, seconds) if sw_ else None
+    if center:
+        log(f"  face at {center[0]:.2f},{center[1]:.2f} - cropping around it")
+    if sw_:
+        sw, sh, x, y = crop_offsets(sw_, sh_, W, H, center)
+        vf = f"scale={sw}:{sh},crop={W}:{H}:{x}:{y},fps=30,format=yuv420p,setsar=1"
+    else:
+        vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,format=yuv420p,setsar=1"
+    sound = ["-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
+    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src, "-vf", vf, *sound,
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
-    if duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
+    if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
                   "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", padded])
@@ -1270,6 +1456,77 @@ def main():
 
 if __name__ == "__main__":
     main()
+'@
+$files['subs.py'] = @'
+"""Word-timed captions (ASS) built from known text and timings - no speech recognition needed."""
+import re
+
+from common import write_text
+
+HIGHLIGHT = "&H0000D7FF"  # gold, ASS colours are &HAABBGGRR
+
+
+def word_times(text, start, end):
+    """Spread the words of `text` across [start, end] in proportion to their length."""
+    words = re.sub(r"[{}\\]", "", text).split()
+    if not words or end <= start:
+        return []
+    weights = [len(w) + 1 for w in words]
+    total, t, out = float(sum(weights)), start, []
+    for w, wt in zip(words, weights):
+        step = (end - start) * wt / total
+        out.append((w, t, t + step))
+        t += step
+    return out
+
+
+def group(words, max_words=4, max_chars=24):
+    """Break a word list into short on-screen lines."""
+    lines, cur, chars = [], [], 0
+    for w in words:
+        if cur and (len(cur) >= max_words or chars + len(w[0]) + 1 > max_chars):
+            lines.append(cur)
+            cur, chars = [], 0
+        cur.append(w)
+        chars += len(w[0]) + 1
+        if w[0][-1:] in ".!?" and len(cur) >= 2:
+            lines.append(cur)
+            cur, chars = [], 0
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _ts(t):
+    t = max(0.0, t)
+    cs = int(round(t * 100))
+    return f"{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}"
+
+
+def build_ass(words, width, height, path):
+    """Write an ASS file where each word turns gold as it is spoken. Returns seconds of caption coverage."""
+    vertical = height > width
+    size = int(height * (0.047 if vertical else 0.065))
+    margin_v = int(height * (0.16 if vertical else 0.08))
+    head = (
+        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
+        f"PlayResX: {width}\nPlayResY: {height}\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Cap,Arial,{size},{HIGHLIGHT},&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,"
+        f"{max(3, size // 11)},0,2,{int(width * 0.06)},{int(width * 0.06)},{margin_v},1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+    lines, covered = [], 0.0
+    for line in group(words):
+        start, end = line[0][1], line[-1][2]
+        if end - start < 0.05:
+            continue
+        text = " ".join(f"{{\\k{max(1, int(round((b - a) * 100)))}}}{w}" for w, a, b in line)
+        lines.append(f"Dialogue: 0,{_ts(start)},{_ts(end)},Cap,,0,0,0,,{text}")
+        covered += end - start
+    write_text(path, head + "\n".join(lines) + "\n")
+    return covered
 '@
 $files['tts.py'] = @'
 """Voice-cloned narration with Qwen3-TTS 0.6B (fits a 4 GB GPU in fp16)."""
@@ -1383,7 +1640,7 @@ if __name__ == "__main__":
     main()
 '@
 $files['pipeline.py'] = @'
-"""Prompt -> outline -> script + shot list -> voice -> visuals -> finished video. All local.
+"""Prompt -> outline -> script + shot list -> voice -> visuals -> video -> quality gate. All local.
 
   python pipeline.py --project <dir> --stage outline --prompt-file prompt.txt [--seconds 45 ...]
   (edit <dir>/outline.txt, then)
@@ -1403,7 +1660,7 @@ import time
 from common import (FF, FORMATS, duration, ensure_dir, fail, gpu_used_mb, log, read_json, read_text,
                     record_metric, run, write_json, write_text)
 
-STAGES = ["outline", "script", "voice", "visuals", "render"]
+STAGES = ["outline", "script", "voice", "visuals", "render", "qa"]
 WORDS_PER_SECOND = 2.5
 
 
@@ -1453,30 +1710,81 @@ def stage_outline(project, cfg, force):
 
 
 # ------------------------------------------------------------------ stage: script
+SOUNDBITE_SECONDS = 7.0
+MAX_SOUNDBITES = 2
+EXPLAIN = {
+    "soundbite": '"soundbite" = the hosts themselves, a real clip played with its own sound (use at most 2); '
+                 'give "query": words to search the episode transcripts, and set "narration" to ""',
+    "footage": '"footage" = silent episode footage under the narration; give "query": words to search the transcripts',
+    "card": '"card" = bold text on screen; give "card_text": max 10 words',
+    "still": '"still" = a generated photo; give "image_prompt": a visual description, no text in the image',
+}
+
+
+def scene_schema(kinds):
+    text = {"type": "string"}
+    return {"type": "object", "required": ["title", "scenes"], "properties": {
+        "title": text,
+        "scenes": {"type": "array", "items": {"type": "object", "required": ["narration", "visual"], "properties": {
+            "narration": text, "visual": {"type": "string", "enum": kinds},
+            "query": text, "card_text": text, "image_prompt": text}}}}}
+
+
 def clean_scenes(raw, kinds):
     """Coerce whatever the model returned into a valid scene list."""
-    scenes = []
+    scenes, bites = [], 0
     for s in (raw.get("scenes") or []) if isinstance(raw, dict) else []:
         if not isinstance(s, dict):
             continue
-        narration = " ".join(str(s.get("narration", "")).split())
-        if not narration:
+        narration = " ".join(str(s.get("narration") or "").split())
+        visual = str(s.get("visual") or "").lower().strip()
+        query = " ".join(str(s.get("query") or "").split())[:200]
+        if visual == "soundbite" and "soundbite" in kinds and query and bites < MAX_SOUNDBITES:
+            bites += 1
+        elif not narration:
             continue
-        visual = str(s.get("visual", "")).lower().strip()
-        if visual not in kinds:
-            visual = kinds[0]
+        elif visual not in kinds or visual == "soundbite":
+            visual = next(k for k in kinds if k != "soundbite")
         scenes.append({
             "narration": narration,
             "visual": visual,
-            "query": str(s.get("query") or narration)[:200],
+            "query": query or narration[:200],
             "card_text": " ".join(str(s.get("card_text") or "").split())[:120],
-            "image_prompt": str(s.get("image_prompt") or s.get("query") or narration)[:300],
+            "image_prompt": str(s.get("image_prompt") or query or narration)[:300],
         })
     return scenes
 
 
+def estimate_seconds(scenes):
+    spoken = sum(len(s["narration"].split()) for s in scenes if s["visual"] != "soundbite")
+    return spoken / WORDS_PER_SECOND + SOUNDBITE_SECONDS * sum(s["visual"] == "soundbite" for s in scenes)
+
+
+def resolve_sources(scenes, lib):
+    """Find the real clip for every footage/soundbite scene now, so later stages know each scene's type."""
+    from library import pick_soundbite
+
+    out = []
+    for s in scenes:
+        if s["visual"] in ("footage", "soundbite"):
+            hit = lib.search(s["query"])
+            if hit and s["visual"] == "soundbite":
+                start, secs, segs = pick_soundbite(hit, s["query"])
+                s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs}
+                s["narration"] = ""
+            elif hit:
+                s["source"] = {"file": hit["file"], "start": hit["start"]}
+            elif not s["narration"]:
+                continue  # a soundbite with nothing to play and nothing to say
+            else:
+                s["visual"] = "card"
+        out.append(s)
+    return out
+
+
 def stage_script(project, cfg, force):
     import llm
+    from library import Library
 
     out = os.path.join(project, "script.json")
     outline_path = os.path.join(project, "outline.txt")
@@ -1493,45 +1801,61 @@ def stage_script(project, cfg, force):
         for sub in ("voice", "visuals", "scenes"):
             shutil.rmtree(os.path.join(project, sub), ignore_errors=True)
 
-    from library import Library
+    lib = Library(library_dir(cfg, project))
     kinds = []
-    if len(Library(library_dir(cfg, project))):
+    if len(lib):
+        if cfg.get("soundbites", True):
+            kinds.append("soundbite")
         kinds.append("footage")
     kinds.append("card")
     if cfg.get("stills"):
         kinds.append("still")
-    words = int(cfg["seconds"] * WORDS_PER_SECOND)
-    explain = {"footage": '"footage" = a real clip from the podcast; give "query": words to search the episode transcripts',
-               "card": '"card" = bold text on screen; give "card_text": max 10 words',
-               "still": '"still" = a generated photo; give "image_prompt": a visual description, no text in image'}
+    target = float(cfg["seconds"])
     bible = style_bible(project)
     system = ("You write narration scripts and shot lists for short podcast videos. Reply with JSON only."
               + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
-    user = (f"Turn this outline into a narrated video of about {cfg['seconds']} seconds "
-            f"(about {words} spoken words in total).\n\nOUTLINE:\n{outline}\n\n"
+    base = (f"Turn this outline into a video of about {target:.0f} seconds. Narration is spoken at "
+            f"{WORDS_PER_SECOND} words per second, so write about {int(target * WORDS_PER_SECOND)} words of narration "
+            f"in total (each soundbite replaces about {int(SOUNDBITE_SECONDS * WORDS_PER_SECOND)} of those words)."
+            f"\n\nOUTLINE:\n{outline}\n\n"
             "Return JSON: {\"title\": str, \"scenes\": [{\"narration\": str, \"visual\": str, "
             "\"query\": str, \"card_text\": str, \"image_prompt\": str}]}\n"
             "Rules:\n- One scene per sentence or two of narration (6 to 12 scenes).\n"
             "- The first scene is the hook. The last scene is the call to action.\n"
             "- Narration is spoken aloud: no emojis, no stage directions, no hashtags.\n"
             "- \"visual\" must be one of: " + ", ".join(kinds) + ".\n"
-            + "\n".join("- " + explain[k] for k in kinds) + "\n- Vary the visuals.")
-    t0 = time.time()
-    scenes, raw = [], {}
+            + "\n".join("- " + EXPLAIN[k] for k in kinds) + "\n- Vary the visuals.")
+    t0, best, feedback = time.time(), None, ""
     for attempt in range(3):
-        raw = llm.chat(system, user, cfg["model"], as_json=True, temperature=0.6 + 0.1 * attempt)
+        raw = llm.chat(system, base + feedback, cfg["model"], schema=scene_schema(kinds),
+                       temperature=0.6 + 0.1 * attempt)
         scenes = clean_scenes(raw, kinds)
-        if len(scenes) >= 3:
+        if len(scenes) < 3:
+            log(f"  attempt {attempt + 1}: unusable script, retrying")
+            continue
+        est = estimate_seconds(scenes)
+        title = raw.get("title") if isinstance(raw, dict) else None
+        if best is None or abs(est - target) < abs(best[0] - target):
+            best = (est, scenes, title)
+        if abs(est - target) <= 0.25 * target:
             break
-        log(f"  attempt {attempt + 1}: unusable script, retrying")
-    if len(scenes) < 3:
+        log(f"  attempt {attempt + 1}: would run ~{est:.0f}s, target {target:.0f}s - asking for a rewrite")
+        feedback = (f"\n\nYour last draft would run about {est:.0f} seconds. Rewrite it to run about {target:.0f} "
+                    f"seconds by {'adding' if est < target else 'cutting'} narration.")
+    if best is None:
         fail("The local model did not produce a usable script. Try another model in the Create tab.")
-    title = str(raw.get("title") or outline.splitlines()[0].replace("TITLE:", "").strip())[:80]
+    est, scenes, title = best
+    scenes = resolve_sources(scenes, lib)
+    if len(scenes) < 2 or not any(s["narration"] for s in scenes):
+        fail("The script has too few usable scenes. Press step 2 again or try another model.")
+    title = str(title or outline.splitlines()[0].replace("TITLE:", "").strip())[:80]
     write_json(out, {"title": title, "outline_sha1": digest, "scenes": scenes})
-    write_text(os.path.join(project, "script.txt"), "\n\n".join(s["narration"] for s in scenes) + "\n")
-    total = sum(len(s["narration"].split()) for s in scenes)
-    record_metric(project, "script", seconds=round(time.time() - t0, 1), scenes=len(scenes), words=total)
-    log(f"Script saved: {len(scenes)} scenes, {total} words (~{total / WORDS_PER_SECOND:.0f}s)")
+    write_text(os.path.join(project, "script.txt"),
+               "\n\n".join(s["narration"] or f"[soundbite: {s['query']}]" for s in scenes) + "\n")
+    kinds_used = {k: sum(s["visual"] == k for s in scenes) for k in kinds}
+    record_metric(project, "script", seconds=round(time.time() - t0, 1), scenes=len(scenes),
+                  estimated_seconds=round(estimate_seconds(scenes), 1), **kinds_used)
+    log(f"Script saved: {len(scenes)} scenes, ~{estimate_seconds(scenes):.0f}s, {kinds_used}")
 
 
 # ------------------------------------------------------------------ stage: voice
@@ -1543,7 +1867,7 @@ def stage_voice(project, cfg, force):
     todo = []
     for i, s in enumerate(script["scenes"], 1):
         wav = os.path.join(vdir, f"scene_{i:02}.wav")
-        if force or not os.path.exists(wav) or duration(wav) < 0.2:
+        if s["visual"] != "soundbite" and (force or not os.path.exists(wav) or duration(wav) < 0.2):
             todo.append((i, s, wav))
     if not todo:
         log("All voice lines exist - skipping")
@@ -1570,34 +1894,34 @@ def stage_voice(project, cfg, force):
 # ------------------------------------------------------------------ stage: visuals
 def stage_visuals(project, cfg, force):
     import visuals
-    from library import Library
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json - run the script stage first.")
     fmt = cfg["format"]
     vdir = ensure_dir(os.path.join(project, "visuals"))
-    lib = Library(library_dir(cfg, project))
     stills, t0 = None, time.time()
-    counts = {"footage": 0, "card": 0, "still": 0}
+    counts = {"soundbite": 0, "footage": 0, "card": 0, "still": 0}
     for i, s in enumerate(script["scenes"], 1):
         out = os.path.join(vdir, f"scene_{i:02}.mp4")
-        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
-        if not os.path.exists(wav):
-            fail(f"Missing voice line {wav} - run the voice stage first.")
-        secs = duration(wav) + 0.05
+        kind, src = s["visual"], s.get("source")
+        if kind == "soundbite":
+            secs = src["seconds"]
+        else:
+            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+            if not os.path.exists(wav):
+                fail(f"Missing voice line {wav} - run the voice stage first.")
+            secs = duration(wav) + 0.05
         if os.path.exists(out) and not force and abs(duration(out) - secs) < 0.6:
+            counts[kind] += 1
             continue
-        kind = s["visual"]
         log(f"[visual {i}/{len(script['scenes'])}] {kind} ({secs:.1f}s)")
         try:
-            if kind == "footage":
-                hit = lib.search(s["query"])
-                if not hit:
-                    raise RuntimeError("no matching footage")
-                log(f"  {os.path.basename(hit['file'])} @ {hit['start']}s (score {hit['score']})")
-                visuals.footage_clip(hit["file"], hit["start"], out, secs, fmt)
-                s["source"] = {"file": hit["file"], "start": hit["start"]}
+            if kind in ("soundbite", "footage"):
+                if not src or not os.path.exists(src["file"]):
+                    raise RuntimeError("source footage is missing")
+                log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
+                visuals.footage_clip(src["file"], src["start"], out, secs, fmt, audio=kind == "soundbite")
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -1606,9 +1930,11 @@ def stage_visuals(project, cfg, force):
             else:
                 raise LookupError
         except Exception as e:
+            if kind == "soundbite":
+                fail(f"Could not cut the soundbite for scene {i}: {e}")
             if not isinstance(e, LookupError):
                 log(f"  {kind} failed ({e}) - using a text card instead")
-            kind = "card"
+            kind = s["visual"] = "card"
             text = s["card_text"] or " ".join(s["narration"].split()[:10])
             visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None)
         counts[kind] += 1
@@ -1620,46 +1946,76 @@ def stage_visuals(project, cfg, force):
 
 # ------------------------------------------------------------------ stage: render
 def stage_render(project, cfg, force):
+    import subs
+
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json.")
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
-    clips, expected = [], 0.0
-    for i in range(1, len(script["scenes"]) + 1):
+    enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    clips, words, offset = [], [], 0.0
+    for i, s in enumerate(script["scenes"], 1):
         vis = os.path.join(project, "visuals", f"scene_{i:02}.mp4")
-        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
-        for p in (vis, wav):
-            if not os.path.exists(p):
-                fail(f"Missing {p} - run earlier stages first.")
         out = os.path.join(sdir, f"scene_{i:02}.mp4")
-        secs = duration(wav)
-        expected += secs
-        # hold the last frame if the picture is shorter than the voice line, then cut to the voice
-        run(FF + ["-i", vis, "-i", wav, "-filter_complex",
-                  f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v]",
-                  "-map", "[v]", "-map", "1:a", "-t", f"{secs:.3f}", "-r", "30",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-                  "-c:a", "aac", "-ar", "48000", "-ac", "2", out])
+        if not os.path.exists(vis):
+            fail(f"Missing {vis} - run the visuals stage first.")
+        if s["visual"] == "soundbite":
+            secs = duration(vis)
+            fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
+            run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
+                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+        else:
+            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+            if not os.path.exists(wav):
+                fail(f"Missing {wav} - run the voice stage first.")
+            secs = duration(wav)
+            fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.02,afade=t=out:st={max(0, secs - 0.04):.3f}:d=0.04"
+            # hold the last frame if the picture is shorter than the voice line, then cut to the voice
+            run(FF + ["-i", vis, "-i", wav, "-filter_complex",
+                      f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
+                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+        real = duration(out)
+        if s["visual"] == "soundbite":
+            for a, b, text in s["source"]["segs"]:
+                words += subs.word_times(text, offset + a, offset + min(b, real))
+        else:
+            words += subs.word_times(s["narration"], offset + 0.05, offset + max(0.3, real - 0.2))
+        offset += real
         clips.append(out)
 
     final = os.path.join(project, "final.mp4")
     cmd = [sys.executable, "-u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assemble.py"),
            "--clips", *clips, "--format", cfg["format"], "--out", final]
+    covered = 0.0
     if cfg.get("captions", True):
-        cmd.append("--captions")
+        ass = os.path.join(project, "captions.ass")
+        covered = subs.build_ass(words, W, H, ass)
+        cmd += ["--ass", ass]
     if cfg.get("music") and os.path.exists(cfg["music"]):
         cmd += ["--music", cfg["music"]]
     run(cmd)
     got = duration(final)
-    ok = abs(got - expected) < 1.5
-    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(expected, 2), duration_ok=ok)
-    log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (voice total {expected:.1f}s)")
+    ok = abs(got - offset) < 1.5
+    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2),
+                  duration_ok=ok, caption_seconds=round(covered, 2))
+    log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (scenes total {offset:.1f}s)")
     log(f"FINAL: {final}")
 
 
+# ------------------------------------------------------------------ stage: qa
+def stage_qa(project, cfg, force):
+    cmd = [sys.executable, "-u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "qa.py"),
+           "--project", project]
+    if not cfg.get("qa_listen", True):
+        cmd.append("--no-listen")
+    if subprocess.run(cmd).returncode != 0:
+        fail("The quality gate found a hard failure - see qa.json in the project folder.")
+
+
 RUN = {"outline": stage_outline, "script": stage_script, "voice": stage_voice,
-       "visuals": stage_visuals, "render": stage_render}
+       "visuals": stage_visuals, "render": stage_render, "qa": stage_qa}
 
 
 def main():
@@ -1679,6 +2035,8 @@ def main():
     ap.add_argument("--device", choices=["cuda", "cpu"])
     ap.add_argument("--stills", choices=["on", "off"])
     ap.add_argument("--captions", choices=["on", "off"])
+    ap.add_argument("--soundbites", choices=["on", "off"])
+    ap.add_argument("--qa-listen", choices=["on", "off"], dest="qa_listen")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -1691,7 +2049,7 @@ def main():
     for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
-    for key in ("stills", "captions"):
+    for key in ("stills", "captions", "soundbites", "qa_listen"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key) == "on"
     if not cfg.get("prompt"):
@@ -1714,14 +2072,16 @@ if __name__ == "__main__":
     main()
 '@
 $files['assemble.py'] = @'
-"""Stitch clips, lay voiceover + music, burn captions, export MP4 (CPU / ffmpeg only)."""
+"""Stitch clips, lay voiceover + music (ducked under speech), burn captions, normalise loudness, export MP4."""
 import argparse
 import os
 import shutil
 import subprocess
 import tempfile
 
-from common import FORMATS, duration, fail, log, run, transcribe, write_srt
+from common import FF, FORMATS, duration, fail, log, run, transcribe, write_srt
+
+LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
 def has_audio(path):
@@ -1734,16 +2094,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--clips", nargs="+", required=True)
     ap.add_argument("--voice", help="Voiceover WAV; replaces clip audio")
-    ap.add_argument("--music", help="Background music")
-    ap.add_argument("--music-volume", type=float, default=0.12)
+    ap.add_argument("--music", help="Background music (looped, lowered while someone speaks)")
+    ap.add_argument("--music-volume", type=float, default=0.25)
     ap.add_argument("--format", default="9:16", choices=list(FORMATS))
-    ap.add_argument("--captions", action="store_true")
+    ap.add_argument("--captions", action="store_true", help="Transcribe and burn in plain captions")
+    ap.add_argument("--ass", help="Burn in this prepared ASS caption file instead of transcribing")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    for c in a.clips:
+    for c in a.clips + [p for p in (a.voice, a.music, a.ass) if p]:
         if not os.path.exists(c):
-            fail(f"Missing clip: {c}")
+            fail(f"Missing file: {c}")
     W, H = FORMATS[a.format]
     tmp = tempfile.mkdtemp(prefix="pstudio_")
     try:
@@ -1753,72 +2114,274 @@ def main():
             o = os.path.join(tmp, f"n{i:03}.mp4")
             vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                   f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p,setsar=1")
-            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", c]
+            cmd = FF + ["-i", c]
             if not has_audio(c):
                 cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest"]
-            cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                     "-c:a", "aac", "-ar", "48000", "-ac", "2", o]
             log(f"Normalising {os.path.basename(c)}")
             run(cmd)
             norm.append(o)
-
-        lst = os.path.join(tmp, "list.txt")
-        with open(lst, "w", encoding="utf-8") as f:
+        with open(os.path.join(tmp, "list.txt"), "w", encoding="utf-8") as f:
             for n in norm:
-                f.write(f"file '{n.replace(os.sep, '/')}'\n")
+                f.write(f"file '{os.path.basename(n)}'\n")
+        run(FF + ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "joined.mp4"], cwd=tmp)
         joined = os.path.join(tmp, "joined.mp4")
-        run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-             "-i", lst, "-c", "copy", joined])
 
-        # 2. audio: voiceover (looping video if voice is longer) + optional music bed
-        stage = joined
-        if a.voice or a.music:
-            mixed = os.path.join(tmp, "mixed.mp4")
-            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-            if a.voice and duration(a.voice) > duration(joined):
-                cmd += ["-stream_loop", "-1"]
-            cmd += ["-i", joined]
-            filt, maps, n = [], [], 1
-            base = "[0:a]"
-            if a.voice:
-                cmd += ["-i", a.voice]
-                base = f"[{n}:a]"
-                n += 1
-            if a.music:
-                cmd += ["-stream_loop", "-1", "-i", a.music]
-                filt.append(f"[{n}:a]volume={a.music_volume}[m]")
-                filt.append(f"{base}[m]amix=inputs=2:duration=first:dropout_transition=0[aout]")
-                maps = ["-map", "0:v", "-map", "[aout]"]
-            else:
-                maps = ["-map", "0:v", "-map", base.strip("[]")]
-            if filt:
-                cmd += ["-filter_complex", ";".join(filt)]
-            cmd += maps + ["-c:v", "copy", "-c:a", "aac"]
-            if a.voice:
-                cmd += ["-shortest"]
-            run(cmd + [mixed])
-            stage = mixed
-
-        # 3. captions burned in (run ffmpeg from tmp so the subtitles path needs no escaping)
-        if a.captions:
-            segs = transcribe(a.voice or stage)
-            write_srt(segs, os.path.join(tmp, "subs.srt"))
+        # 2. captions file (ffmpeg runs inside tmp so the filter needs no Windows path escaping)
+        vfilter = None
+        if a.ass:
+            shutil.copy(a.ass, os.path.join(tmp, "subs.ass"))
+            vfilter = "ass=subs.ass"
+        elif a.captions:
+            write_srt(transcribe(a.voice or joined), os.path.join(tmp, "subs.srt"))
             shutil.copy(os.path.join(tmp, "subs.srt"), os.path.splitext(a.out)[0] + ".srt")
             # libass lays SRT out on a 288-line canvas, so size and margin are in those units
-            size = 16 if H > W else 12
-            style = (f"FontName=Arial,FontSize={size},Bold=1,PrimaryColour=&H00FFFFFF,"
+            style = (f"FontName=Arial,FontSize={16 if H > W else 12},Bold=1,PrimaryColour=&H00FFFFFF,"
                      f"OutlineColour=&H00000000,Outline=3,Shadow=0,Alignment=2,MarginV={28 if H > W else 20}")
-            capt = os.path.join(tmp, "capt.mp4")
-            run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", os.path.basename(stage),
-                 "-vf", f"subtitles=subs.srt:force_style='{style}'", "-c:v", "libx264",
-                 "-preset", "veryfast", "-crf", "20", "-c:a", "copy", "capt.mp4"], cwd=tmp)
-            stage = capt
+            vfilter = f"subtitles=subs.srt:force_style='{style}'"
+
+        # 3. one final pass: captions + voice/music mix + loudness
+        cmd = list(FF)
+        if a.voice and duration(a.voice) > duration(joined):
+            cmd += ["-stream_loop", "-1"]  # loop the picture under a longer voiceover
+        cmd += ["-i", "joined.mp4"]
+        speech, n = "[0:a]", 1
+        if a.voice:
+            cmd += ["-i", os.path.abspath(a.voice)]
+            speech, n = f"[{n}:a]", n + 1
+        graph = []
+        if a.music:
+            cmd += ["-stream_loop", "-1", "-i", os.path.abspath(a.music)]
+            graph += [f"{speech}aresample=48000,asplit=2[sp][key]",
+                      f"[{n}:a]aresample=48000,volume={a.music_volume}[mu]",
+                      "[mu][key]sidechaincompress=threshold=0.03:ratio=10:attack=15:release=350[duck]",
+                      f"[sp][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{LOUDNESS}[aout]"]
+        else:
+            graph.append(f"{speech}{LOUDNESS}[aout]")
+        if vfilter:
+            graph.append(f"[0:v]{vfilter}[vout]")
+            cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-filter_complex", ";".join(graph), "-map", "0:v", "-map", "[aout]", "-c:v", "copy"]
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        if a.voice:
+            cmd += ["-shortest"]
+        else:
+            cmd += ["-t", f"{duration(joined):.3f}"]
+        cmd += ["-movflags", "+faststart", "final.mp4"]
+        run(cmd, cwd=tmp)
 
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-        shutil.copy(stage, a.out)
+        shutil.copy(os.path.join(tmp, "final.mp4"), a.out)
         log(f"Rendered: {a.out}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['qa.py'] = @'
+"""Quality gate for a finished project. Writes <project>/qa.json and exits 1 on a hard failure.
+
+  python qa.py --project <dir> [--no-listen]
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+from common import FORMATS, duration, log, read_json, video_size, write_json
+
+checks = []
+
+
+def add(name, status, detail):
+    checks.append({"check": name, "status": status, "detail": detail})
+    log(f"  [{status:4}] {name}: {detail}")
+
+
+def ffmpeg_report(path, *filters):
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, *filters, "-f", "null", "-"],
+                         capture_output=True, text=True)
+    return out.stderr
+
+
+def _words(text):
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def listen(project, script):
+    """Transcribe each voice line and compare it with the script (catches garbled speech)."""
+    from common import transcribe
+    bad, scores = [], []
+    for i, s in enumerate(script["scenes"], 1):
+        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+        if s["visual"] == "soundbite" or not os.path.exists(wav):
+            continue
+        want = _words(s["narration"])
+        heard = set(_words(" ".join(t for _, _, t in transcribe(wav))))
+        score = sum(1 for w in want if w in heard) / (len(want) or 1)
+        scores.append(score)
+        if score < 0.6:
+            bad.append(f"scene {i} ({score:.0%})")
+    if not scores:
+        return add("voice matches script", "skip", "no voice lines")
+    avg = sum(scores) / len(scores)
+    add("voice matches script", "warn" if bad else "pass",
+        f"average {avg:.0%} of script words heard" + (f"; re-make: {', '.join(bad)}" if bad else ""))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--no-listen", action="store_true", help="Skip the speech-to-text check of the voice")
+    a = ap.parse_args()
+    project = os.path.abspath(a.project)
+    cfg = read_json(os.path.join(project, "project.json"), {})
+    script = read_json(os.path.join(project, "script.json"), {"scenes": []})
+    metrics = read_json(os.path.join(project, "metrics.json"), {})
+    final = os.path.join(project, "final.mp4")
+    if not os.path.exists(final):
+        add("final video exists", "FAIL", "final.mp4 is missing")
+    else:
+        d = duration(final)
+        expected = metrics.get("render", {}).get("expected_seconds", d)
+        add("length matches scenes", "pass" if abs(d - expected) < 1.5 else "FAIL", f"{d:.1f}s (scenes total {expected:.1f}s)")
+        target = float(cfg.get("seconds", d))
+        off = abs(d - target) / target if target else 0
+        add("length near target", "pass" if off <= 0.25 else "warn", f"{d:.0f}s vs {target:.0f}s asked ({off:.0%} off)")
+        want = FORMATS.get(cfg.get("format", "9:16"))
+        got = video_size(final)
+        add("resolution", "pass" if got == want else "FAIL", f"{got[0]}x{got[1]}")
+
+        rep = ffmpeg_report(final, "-vf", "blackdetect=d=0.5:pix_th=0.10", "-af",
+                            "silencedetect=noise=-45dB:d=1.5,ebur128")
+        if "Stream #0" not in rep or "Audio:" not in rep:
+            add("has audio", "FAIL", "no audio stream")
+        else:
+            m = re.findall(r"I:\s+(-?[\d.]+) LUFS", rep)
+            if m:
+                lufs = float(m[-1])
+                add("loudness", "pass" if -17 <= lufs <= -11 else "warn", f"{lufs:.1f} LUFS (target -14)")
+            black = [float(x) for x in re.findall(r"black_duration:([\d.]+)", rep)]
+            add("no black frames", "pass" if not black else "warn",
+                "none" if not black else f"{len(black)} stretch(es), {sum(black):.1f}s")
+            silent = [float(x) for x in re.findall(r"silence_duration: ([\d.]+)", rep)]
+            add("no long silences", "pass" if not silent else "warn",
+                "none" if not silent else f"{len(silent)} gap(s), longest {max(silent):.1f}s")
+        cov = metrics.get("render", {}).get("caption_seconds")
+        if cov is not None and d:
+            add("caption coverage", "pass" if cov / d >= 0.8 else "warn", f"{cov / d:.0%} of the video")
+
+    kinds = [s["visual"] for s in script["scenes"]]
+    if kinds:
+        top = max(kinds.count(k) for k in set(kinds)) / len(kinds)
+        add("visual variety", "pass" if (top < 0.8 or len(kinds) < 4) else "warn",
+            ", ".join(f"{k} x{kinds.count(k)}" for k in sorted(set(kinds))))
+    if not a.no_listen and script["scenes"]:
+        try:
+            listen(project, script)
+        except Exception as e:  # noqa: BLE001
+            add("voice matches script", "skip", f"speech-to-text unavailable ({e})")
+
+    failed = [c for c in checks if c["status"] == "FAIL"]
+    warned = [c for c in checks if c["status"] == "warn"]
+    verdict = "FAIL" if failed else ("PASS WITH WARNINGS" if warned else "PASS")
+    write_json(os.path.join(project, "qa.json"), {"verdict": verdict, "checks": checks})
+    log(f"QUALITY GATE: {verdict}")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['stylebible.py'] = @'
+"""Build style-bible.md on this PC from the indexed episodes: transcripts + measured pacing, written by the local model.
+
+  python stylebible.py --lib <workspace>/library --out <workspace>/style-bible.md [--model gemma3:4b]
+"""
+import argparse
+import os
+import re
+import subprocess
+
+from common import duration, fail, log, read_json, write_text
+
+
+def cut_rate(video, seconds=180):
+    """Scene cuts per minute over the first few minutes (ffmpeg scene detection)."""
+    span = min(seconds, duration(video))
+    if span < 5:
+        return None
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-t", str(span), "-i", video, "-an",
+                          "-vf", "scale=320:-2,select='gt(scene,0.30)',showinfo", "-f", "null", "-"],
+                         capture_output=True, text=True)
+    return len(re.findall(r"pts_time:", out.stderr)) / (span / 60.0)
+
+
+def measure(index):
+    files = [f for f in index["files"] if os.path.exists(f)]
+    lengths = [duration(f) for f in files]
+    words = secs = 0.0
+    for c in index["chunks"]:
+        for a, b, t in c.get("segs") or [[c["start"], c["end"], c["text"]]]:
+            words += len(t.split())
+            secs += max(0.0, b - a)
+    cuts = [r for r in (cut_rate(f) for f in sorted(files, key=duration)[:4]) if r is not None]
+    shorts = [x for x in lengths if x <= 180]
+    return {
+        "videos": len(files),
+        "short_videos": len(shorts),
+        "typical_short_seconds": round(sorted(shorts)[len(shorts) // 2]) if shorts else None,
+        "speaking_words_per_second": round(words / secs, 2) if secs else None,
+        "cuts_per_minute": round(sum(cuts) / len(cuts), 1) if cuts else None,
+    }
+
+
+def sample_text(index, budget=7000):
+    """Evenly spaced transcript excerpts, plus the opening lines of each video (the hooks)."""
+    by_file = {}
+    for c in index["chunks"]:
+        by_file.setdefault(c["file"], []).append(c)
+    hooks = [f"- {os.path.basename(f)}: {cs[0]['text'][:220]}" for f, cs in list(by_file.items())[:25]]
+    chunks = index["chunks"]
+    step = max(1, len(chunks) // 20)
+    body = [c["text"] for c in chunks[::step]]
+    text = "OPENING LINES:\n" + "\n".join(hooks) + "\n\nEXCERPTS:\n" + "\n---\n".join(body)
+    return text[:budget]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lib", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--model", default="gemma3:4b")
+    a = ap.parse_args()
+
+    index = read_json(os.path.join(a.lib, "index.json"))
+    if not index or not index.get("chunks"):
+        fail("No footage library yet. Use 'Index footage' in the Create tab first.")
+    log("Measuring pacing (cut rate, speaking speed, lengths)...")
+    stats = measure(index)
+    log(f"  {stats}")
+
+    import llm
+    system = ("You are a video producer writing a style guide for a podcast's short videos. "
+              "Base every statement on the transcript excerpts and measurements given. "
+              "If something cannot be known from them, say 'not observed'. Plain markdown.")
+    user = (f"MEASUREMENTS:\n{stats}\n\n{sample_text(index)}\n\n"
+            "Write the style guide with exactly these sections:\n"
+            "## Voice and tone\n## Recurring topics\n## Hook patterns (with 8 example hooks in this voice)\n"
+            "## Pacing and length\n## Vocabulary and phrases to use\n## Things to avoid\n## Call-to-action style")
+    text = llm.chat(system, user, a.model, temperature=0.4)
+    header = ("# Style bible\n\n_Built locally from the indexed episodes._\n\n## Measured\n"
+              + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in stats.items() if v is not None) + "\n\n")
+    write_text(a.out, header + text.strip() + "\n")
+    log(f"Saved {a.out}")
 
 
 if __name__ == "__main__":
@@ -2140,7 +2703,7 @@ def main():
     log("Python packages")
     for m in ("torch", "faster_whisper", "qwen_tts", "PIL", "soundfile"):
         check(m, module(m))
-    for m in ("diffusers", "fal_client"):
+    for m in ("cv2", "diffusers", "fal_client"):
         check(m, module(m), required=False)
     check("GPU", torch_gpu, required=False)
     log("Local language model")
@@ -2183,7 +2746,7 @@ Local pipeline that turns a prompt into a short video in the podcast's style.
 Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Layout
-- `projects/<name>/` - one folder per video: `project.json`, `outline.txt`, `script.json`, `voice/`, `visuals/`, `scenes/`, `final.mp4`, `metrics.json`
+- `projects/<name>/` - one folder per video: `project.json`, `outline.txt`, `script.json`, `voice/`, `visuals/`, `scenes/`, `captions.ass`, `final.mp4`, `metrics.json`, `qa.json`
 - `library/index.json` - searchable transcript index of the episode footage
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
@@ -2191,7 +2754,9 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
-- One stage: `--stage script|voice|visuals|render` (add `--force` to redo it)
+- One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
+- Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
+- Quality gate: `python ..\app\qa.py --project projects\x`
 - Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
 - One visual: `python ..\app\visuals.py card "Text" --out clips\c.mp4 --seconds 4`
@@ -2201,7 +2766,9 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Rules
 - Only clone voices of people who have consented.
-- `script.json` scenes: `narration`, `visual` (footage | card | still), `query`, `card_text`, `image_prompt`.
+- `script.json` scenes: `narration`, `visual` (soundbite | footage | card | still), `query`, `card_text`, `image_prompt`, `source`.
+- A soundbite plays a real episode clip with its own sound (max 2 per video); other scenes use the cloned voice.
+- Captions are built from the script and measured timings, not from speech recognition.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.
 '@
 foreach ($name in $files.Keys) {
@@ -2231,4 +2798,5 @@ if ($LASTEXITCODE -eq 0) { Ok 'self-test passed' } else { Warn "self-test report
 $mins = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 Write-Host "`nDone in $mins min. Launching Podcast Studio..." -ForegroundColor Green
 Write-Host "Next: Voice clone tab > extract a voice sample; Create tab > Index footage, then type a prompt."
+Save-Log
 Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$gui`""

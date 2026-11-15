@@ -1,6 +1,7 @@
 # Podcast Studio - local GUI: prompt -> outline -> script -> voice -> visuals -> video (all on this PC)
 # Windows PowerShell 5.1+.  Launch:  powershell -ExecutionPolicy Bypass -File PodcastStudio.ps1
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $Root   = Split-Path $PSScriptRoot -Parent
@@ -245,7 +246,7 @@ $b.Add_Click({
 })
 Add-Label $t0 'Outline (editable)' 10 220 | Out-Null
 $cOutline = Add-Text $t0 150 220 760 '' 185
-$n0 = Add-Label $t0 'Runs fully on this PC: Ollama writes the outline and script, Qwen3-TTS speaks it, visuals come from your indexed episodes, text cards and optional AI stills. A failed run resumes: press step 2 again.' 150 408 760
+$n0 = Add-Label $t0 'Runs fully on this PC: a local model writes the outline and script, your cloned voice narrates, and scenes use real soundbites and footage from your indexed episodes, text cards and optional AI stills. Ends with a quality report (qa.json). A failed run resumes: press step 2 again.' 150 408 760
 $n0.Size = New-Object System.Drawing.Size(760, 34)
 
 # ================================================================ TAB 1: Analyze
@@ -286,13 +287,16 @@ $b.Add_Click({
         Run-Py 'Transcribe' 'captions.py' @($src, '--model', $aWhisper.Text, '--out', (Join-Path $Work "analysis\$name"))
     }
 })
-$b = Add-Button $t1 'Ask Claude: build style bible' 490 140 230
+$b = Add-Button $t1 'Build style bible (local)' 490 140 230
 $b.Add_Click({
-    $prompt = 'Read everything in analysis/ (frames, transcripts) and CLAUDE.md. Write style-bible.md describing this podcast: hosts, voice and tone, recurring topics, hook patterns, pacing and cut rhythm, caption style, typical short-form length, and 10 example hooks. Then list 5 new short-video ideas in that style.'
-    Start-Process powershell.exe -WorkingDirectory $Work -ArgumentList '-NoExit', '-Command', ("claude " + (Q $prompt))
+    if (-not (Test-Path (Join-Path $Work 'library\index.json'))) { Msg 'Index your episodes first (Create tab > Index footage).'; return }
+    $script:ctx = @{ out = (Join-Path $Work 'style-bible.md') }
+    Run-Py 'Build style bible (local model)' 'stylebible.py' @('--lib', (Join-Path $Work 'library'), '--out', $script:ctx.out, '--model', $cModel.Text) {
+        if (Test-Path $script:ctx.out) { Start-Process notepad.exe $script:ctx.out }
+    }
 })
 $note = Add-Label $t1 ("Tips: 'balanced' samples scene changes. For a 45-min episode, analyse 5-10 min windows with Start/End. " +
-    "Output lands in workspace\analysis. The style bible step opens Claude Code in the workspace.") 10 190 900
+    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 190 900
 $note.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 2: Voice

@@ -1,4 +1,4 @@
-"""Prompt -> outline -> script + shot list -> voice -> visuals -> finished video. All local.
+"""Prompt -> outline -> script + shot list -> voice -> visuals -> video -> quality gate. All local.
 
   python pipeline.py --project <dir> --stage outline --prompt-file prompt.txt [--seconds 45 ...]
   (edit <dir>/outline.txt, then)
@@ -18,7 +18,7 @@ import time
 from common import (FF, FORMATS, duration, ensure_dir, fail, gpu_used_mb, log, read_json, read_text,
                     record_metric, run, write_json, write_text)
 
-STAGES = ["outline", "script", "voice", "visuals", "render"]
+STAGES = ["outline", "script", "voice", "visuals", "render", "qa"]
 WORDS_PER_SECOND = 2.5
 
 
@@ -68,30 +68,81 @@ def stage_outline(project, cfg, force):
 
 
 # ------------------------------------------------------------------ stage: script
+SOUNDBITE_SECONDS = 7.0
+MAX_SOUNDBITES = 2
+EXPLAIN = {
+    "soundbite": '"soundbite" = the hosts themselves, a real clip played with its own sound (use at most 2); '
+                 'give "query": words to search the episode transcripts, and set "narration" to ""',
+    "footage": '"footage" = silent episode footage under the narration; give "query": words to search the transcripts',
+    "card": '"card" = bold text on screen; give "card_text": max 10 words',
+    "still": '"still" = a generated photo; give "image_prompt": a visual description, no text in the image',
+}
+
+
+def scene_schema(kinds):
+    text = {"type": "string"}
+    return {"type": "object", "required": ["title", "scenes"], "properties": {
+        "title": text,
+        "scenes": {"type": "array", "items": {"type": "object", "required": ["narration", "visual"], "properties": {
+            "narration": text, "visual": {"type": "string", "enum": kinds},
+            "query": text, "card_text": text, "image_prompt": text}}}}}
+
+
 def clean_scenes(raw, kinds):
     """Coerce whatever the model returned into a valid scene list."""
-    scenes = []
+    scenes, bites = [], 0
     for s in (raw.get("scenes") or []) if isinstance(raw, dict) else []:
         if not isinstance(s, dict):
             continue
-        narration = " ".join(str(s.get("narration", "")).split())
-        if not narration:
+        narration = " ".join(str(s.get("narration") or "").split())
+        visual = str(s.get("visual") or "").lower().strip()
+        query = " ".join(str(s.get("query") or "").split())[:200]
+        if visual == "soundbite" and "soundbite" in kinds and query and bites < MAX_SOUNDBITES:
+            bites += 1
+        elif not narration:
             continue
-        visual = str(s.get("visual", "")).lower().strip()
-        if visual not in kinds:
-            visual = kinds[0]
+        elif visual not in kinds or visual == "soundbite":
+            visual = next(k for k in kinds if k != "soundbite")
         scenes.append({
             "narration": narration,
             "visual": visual,
-            "query": str(s.get("query") or narration)[:200],
+            "query": query or narration[:200],
             "card_text": " ".join(str(s.get("card_text") or "").split())[:120],
-            "image_prompt": str(s.get("image_prompt") or s.get("query") or narration)[:300],
+            "image_prompt": str(s.get("image_prompt") or query or narration)[:300],
         })
     return scenes
 
 
+def estimate_seconds(scenes):
+    spoken = sum(len(s["narration"].split()) for s in scenes if s["visual"] != "soundbite")
+    return spoken / WORDS_PER_SECOND + SOUNDBITE_SECONDS * sum(s["visual"] == "soundbite" for s in scenes)
+
+
+def resolve_sources(scenes, lib):
+    """Find the real clip for every footage/soundbite scene now, so later stages know each scene's type."""
+    from library import pick_soundbite
+
+    out = []
+    for s in scenes:
+        if s["visual"] in ("footage", "soundbite"):
+            hit = lib.search(s["query"])
+            if hit and s["visual"] == "soundbite":
+                start, secs, segs = pick_soundbite(hit, s["query"])
+                s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs}
+                s["narration"] = ""
+            elif hit:
+                s["source"] = {"file": hit["file"], "start": hit["start"]}
+            elif not s["narration"]:
+                continue  # a soundbite with nothing to play and nothing to say
+            else:
+                s["visual"] = "card"
+        out.append(s)
+    return out
+
+
 def stage_script(project, cfg, force):
     import llm
+    from library import Library
 
     out = os.path.join(project, "script.json")
     outline_path = os.path.join(project, "outline.txt")
@@ -108,45 +159,61 @@ def stage_script(project, cfg, force):
         for sub in ("voice", "visuals", "scenes"):
             shutil.rmtree(os.path.join(project, sub), ignore_errors=True)
 
-    from library import Library
+    lib = Library(library_dir(cfg, project))
     kinds = []
-    if len(Library(library_dir(cfg, project))):
+    if len(lib):
+        if cfg.get("soundbites", True):
+            kinds.append("soundbite")
         kinds.append("footage")
     kinds.append("card")
     if cfg.get("stills"):
         kinds.append("still")
-    words = int(cfg["seconds"] * WORDS_PER_SECOND)
-    explain = {"footage": '"footage" = a real clip from the podcast; give "query": words to search the episode transcripts',
-               "card": '"card" = bold text on screen; give "card_text": max 10 words',
-               "still": '"still" = a generated photo; give "image_prompt": a visual description, no text in image'}
+    target = float(cfg["seconds"])
     bible = style_bible(project)
     system = ("You write narration scripts and shot lists for short podcast videos. Reply with JSON only."
               + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
-    user = (f"Turn this outline into a narrated video of about {cfg['seconds']} seconds "
-            f"(about {words} spoken words in total).\n\nOUTLINE:\n{outline}\n\n"
+    base = (f"Turn this outline into a video of about {target:.0f} seconds. Narration is spoken at "
+            f"{WORDS_PER_SECOND} words per second, so write about {int(target * WORDS_PER_SECOND)} words of narration "
+            f"in total (each soundbite replaces about {int(SOUNDBITE_SECONDS * WORDS_PER_SECOND)} of those words)."
+            f"\n\nOUTLINE:\n{outline}\n\n"
             "Return JSON: {\"title\": str, \"scenes\": [{\"narration\": str, \"visual\": str, "
             "\"query\": str, \"card_text\": str, \"image_prompt\": str}]}\n"
             "Rules:\n- One scene per sentence or two of narration (6 to 12 scenes).\n"
             "- The first scene is the hook. The last scene is the call to action.\n"
             "- Narration is spoken aloud: no emojis, no stage directions, no hashtags.\n"
             "- \"visual\" must be one of: " + ", ".join(kinds) + ".\n"
-            + "\n".join("- " + explain[k] for k in kinds) + "\n- Vary the visuals.")
-    t0 = time.time()
-    scenes, raw = [], {}
+            + "\n".join("- " + EXPLAIN[k] for k in kinds) + "\n- Vary the visuals.")
+    t0, best, feedback = time.time(), None, ""
     for attempt in range(3):
-        raw = llm.chat(system, user, cfg["model"], as_json=True, temperature=0.6 + 0.1 * attempt)
+        raw = llm.chat(system, base + feedback, cfg["model"], schema=scene_schema(kinds),
+                       temperature=0.6 + 0.1 * attempt)
         scenes = clean_scenes(raw, kinds)
-        if len(scenes) >= 3:
+        if len(scenes) < 3:
+            log(f"  attempt {attempt + 1}: unusable script, retrying")
+            continue
+        est = estimate_seconds(scenes)
+        title = raw.get("title") if isinstance(raw, dict) else None
+        if best is None or abs(est - target) < abs(best[0] - target):
+            best = (est, scenes, title)
+        if abs(est - target) <= 0.25 * target:
             break
-        log(f"  attempt {attempt + 1}: unusable script, retrying")
-    if len(scenes) < 3:
+        log(f"  attempt {attempt + 1}: would run ~{est:.0f}s, target {target:.0f}s - asking for a rewrite")
+        feedback = (f"\n\nYour last draft would run about {est:.0f} seconds. Rewrite it to run about {target:.0f} "
+                    f"seconds by {'adding' if est < target else 'cutting'} narration.")
+    if best is None:
         fail("The local model did not produce a usable script. Try another model in the Create tab.")
-    title = str(raw.get("title") or outline.splitlines()[0].replace("TITLE:", "").strip())[:80]
+    est, scenes, title = best
+    scenes = resolve_sources(scenes, lib)
+    if len(scenes) < 2 or not any(s["narration"] for s in scenes):
+        fail("The script has too few usable scenes. Press step 2 again or try another model.")
+    title = str(title or outline.splitlines()[0].replace("TITLE:", "").strip())[:80]
     write_json(out, {"title": title, "outline_sha1": digest, "scenes": scenes})
-    write_text(os.path.join(project, "script.txt"), "\n\n".join(s["narration"] for s in scenes) + "\n")
-    total = sum(len(s["narration"].split()) for s in scenes)
-    record_metric(project, "script", seconds=round(time.time() - t0, 1), scenes=len(scenes), words=total)
-    log(f"Script saved: {len(scenes)} scenes, {total} words (~{total / WORDS_PER_SECOND:.0f}s)")
+    write_text(os.path.join(project, "script.txt"),
+               "\n\n".join(s["narration"] or f"[soundbite: {s['query']}]" for s in scenes) + "\n")
+    kinds_used = {k: sum(s["visual"] == k for s in scenes) for k in kinds}
+    record_metric(project, "script", seconds=round(time.time() - t0, 1), scenes=len(scenes),
+                  estimated_seconds=round(estimate_seconds(scenes), 1), **kinds_used)
+    log(f"Script saved: {len(scenes)} scenes, ~{estimate_seconds(scenes):.0f}s, {kinds_used}")
 
 
 # ------------------------------------------------------------------ stage: voice
@@ -158,7 +225,7 @@ def stage_voice(project, cfg, force):
     todo = []
     for i, s in enumerate(script["scenes"], 1):
         wav = os.path.join(vdir, f"scene_{i:02}.wav")
-        if force or not os.path.exists(wav) or duration(wav) < 0.2:
+        if s["visual"] != "soundbite" and (force or not os.path.exists(wav) or duration(wav) < 0.2):
             todo.append((i, s, wav))
     if not todo:
         log("All voice lines exist - skipping")
@@ -185,34 +252,34 @@ def stage_voice(project, cfg, force):
 # ------------------------------------------------------------------ stage: visuals
 def stage_visuals(project, cfg, force):
     import visuals
-    from library import Library
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json - run the script stage first.")
     fmt = cfg["format"]
     vdir = ensure_dir(os.path.join(project, "visuals"))
-    lib = Library(library_dir(cfg, project))
     stills, t0 = None, time.time()
-    counts = {"footage": 0, "card": 0, "still": 0}
+    counts = {"soundbite": 0, "footage": 0, "card": 0, "still": 0}
     for i, s in enumerate(script["scenes"], 1):
         out = os.path.join(vdir, f"scene_{i:02}.mp4")
-        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
-        if not os.path.exists(wav):
-            fail(f"Missing voice line {wav} - run the voice stage first.")
-        secs = duration(wav) + 0.05
+        kind, src = s["visual"], s.get("source")
+        if kind == "soundbite":
+            secs = src["seconds"]
+        else:
+            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+            if not os.path.exists(wav):
+                fail(f"Missing voice line {wav} - run the voice stage first.")
+            secs = duration(wav) + 0.05
         if os.path.exists(out) and not force and abs(duration(out) - secs) < 0.6:
+            counts[kind] += 1
             continue
-        kind = s["visual"]
         log(f"[visual {i}/{len(script['scenes'])}] {kind} ({secs:.1f}s)")
         try:
-            if kind == "footage":
-                hit = lib.search(s["query"])
-                if not hit:
-                    raise RuntimeError("no matching footage")
-                log(f"  {os.path.basename(hit['file'])} @ {hit['start']}s (score {hit['score']})")
-                visuals.footage_clip(hit["file"], hit["start"], out, secs, fmt)
-                s["source"] = {"file": hit["file"], "start": hit["start"]}
+            if kind in ("soundbite", "footage"):
+                if not src or not os.path.exists(src["file"]):
+                    raise RuntimeError("source footage is missing")
+                log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
+                visuals.footage_clip(src["file"], src["start"], out, secs, fmt, audio=kind == "soundbite")
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -221,9 +288,11 @@ def stage_visuals(project, cfg, force):
             else:
                 raise LookupError
         except Exception as e:
+            if kind == "soundbite":
+                fail(f"Could not cut the soundbite for scene {i}: {e}")
             if not isinstance(e, LookupError):
                 log(f"  {kind} failed ({e}) - using a text card instead")
-            kind = "card"
+            kind = s["visual"] = "card"
             text = s["card_text"] or " ".join(s["narration"].split()[:10])
             visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None)
         counts[kind] += 1
@@ -235,46 +304,76 @@ def stage_visuals(project, cfg, force):
 
 # ------------------------------------------------------------------ stage: render
 def stage_render(project, cfg, force):
+    import subs
+
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json.")
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
-    clips, expected = [], 0.0
-    for i in range(1, len(script["scenes"]) + 1):
+    enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    clips, words, offset = [], [], 0.0
+    for i, s in enumerate(script["scenes"], 1):
         vis = os.path.join(project, "visuals", f"scene_{i:02}.mp4")
-        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
-        for p in (vis, wav):
-            if not os.path.exists(p):
-                fail(f"Missing {p} - run earlier stages first.")
         out = os.path.join(sdir, f"scene_{i:02}.mp4")
-        secs = duration(wav)
-        expected += secs
-        # hold the last frame if the picture is shorter than the voice line, then cut to the voice
-        run(FF + ["-i", vis, "-i", wav, "-filter_complex",
-                  f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v]",
-                  "-map", "[v]", "-map", "1:a", "-t", f"{secs:.3f}", "-r", "30",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-                  "-c:a", "aac", "-ar", "48000", "-ac", "2", out])
+        if not os.path.exists(vis):
+            fail(f"Missing {vis} - run the visuals stage first.")
+        if s["visual"] == "soundbite":
+            secs = duration(vis)
+            fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
+            run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
+                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+        else:
+            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+            if not os.path.exists(wav):
+                fail(f"Missing {wav} - run the voice stage first.")
+            secs = duration(wav)
+            fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.02,afade=t=out:st={max(0, secs - 0.04):.3f}:d=0.04"
+            # hold the last frame if the picture is shorter than the voice line, then cut to the voice
+            run(FF + ["-i", vis, "-i", wav, "-filter_complex",
+                      f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
+                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+        real = duration(out)
+        if s["visual"] == "soundbite":
+            for a, b, text in s["source"]["segs"]:
+                words += subs.word_times(text, offset + a, offset + min(b, real))
+        else:
+            words += subs.word_times(s["narration"], offset + 0.05, offset + max(0.3, real - 0.2))
+        offset += real
         clips.append(out)
 
     final = os.path.join(project, "final.mp4")
     cmd = [sys.executable, "-u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assemble.py"),
            "--clips", *clips, "--format", cfg["format"], "--out", final]
+    covered = 0.0
     if cfg.get("captions", True):
-        cmd.append("--captions")
+        ass = os.path.join(project, "captions.ass")
+        covered = subs.build_ass(words, W, H, ass)
+        cmd += ["--ass", ass]
     if cfg.get("music") and os.path.exists(cfg["music"]):
         cmd += ["--music", cfg["music"]]
     run(cmd)
     got = duration(final)
-    ok = abs(got - expected) < 1.5
-    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(expected, 2), duration_ok=ok)
-    log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (voice total {expected:.1f}s)")
+    ok = abs(got - offset) < 1.5
+    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2),
+                  duration_ok=ok, caption_seconds=round(covered, 2))
+    log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (scenes total {offset:.1f}s)")
     log(f"FINAL: {final}")
 
 
+# ------------------------------------------------------------------ stage: qa
+def stage_qa(project, cfg, force):
+    cmd = [sys.executable, "-u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "qa.py"),
+           "--project", project]
+    if not cfg.get("qa_listen", True):
+        cmd.append("--no-listen")
+    if subprocess.run(cmd).returncode != 0:
+        fail("The quality gate found a hard failure - see qa.json in the project folder.")
+
+
 RUN = {"outline": stage_outline, "script": stage_script, "voice": stage_voice,
-       "visuals": stage_visuals, "render": stage_render}
+       "visuals": stage_visuals, "render": stage_render, "qa": stage_qa}
 
 
 def main():
@@ -294,6 +393,8 @@ def main():
     ap.add_argument("--device", choices=["cuda", "cpu"])
     ap.add_argument("--stills", choices=["on", "off"])
     ap.add_argument("--captions", choices=["on", "off"])
+    ap.add_argument("--soundbites", choices=["on", "off"])
+    ap.add_argument("--qa-listen", choices=["on", "off"], dest="qa_listen")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -306,7 +407,7 @@ def main():
     for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
-    for key in ("stills", "captions"):
+    for key in ("stills", "captions", "soundbites", "qa_listen"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key) == "on"
     if not cfg.get("prompt"):

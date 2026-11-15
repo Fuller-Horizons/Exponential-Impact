@@ -4,7 +4,7 @@ Local pipeline that turns a prompt into a short video in the podcast's style.
 Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Layout
-- `projects/<name>/` - one folder per video: `project.json`, `outline.txt`, `script.json`, `voice/`, `visuals/`, `scenes/`, `final.mp4`, `metrics.json`
+- `projects/<name>/` - one folder per video: `project.json`, `outline.txt`, `script.json`, `voice/`, `visuals/`, `scenes/`, `captions.ass`, `final.mp4`, `metrics.json`, `qa.json`
 - `library/index.json` - searchable transcript index of the episode footage
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
@@ -12,7 +12,9 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
-- One stage: `--stage script|voice|visuals|render` (add `--force` to redo it)
+- One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
+- Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
+- Quality gate: `python ..\app\qa.py --project projects\x`
 - Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
 - One visual: `python ..\app\visuals.py card "Text" --out clips\c.mp4 --seconds 4`
@@ -22,5 +24,7 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Rules
 - Only clone voices of people who have consented.
-- `script.json` scenes: `narration`, `visual` (footage | card | still), `query`, `card_text`, `image_prompt`.
+- `script.json` scenes: `narration`, `visual` (soundbite | footage | card | still), `query`, `card_text`, `image_prompt`, `source`.
+- A soundbite plays a real episode clip with its own sound (max 2 per video); other scenes use the cloned voice.
+- Captions are built from the script and measured timings, not from speech recognition.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.

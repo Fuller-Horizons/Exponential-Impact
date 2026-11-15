@@ -15,18 +15,37 @@ WINDOW = 20.0  # seconds of speech per searchable chunk
 
 
 def _chunks(segs):
+    """Group transcript segments into ~20 s chunks: (start, end, text, [segments])."""
     out, cur = [], None
     for start, end, text in segs:
+        seg = [round(start, 2), round(end, 2), text]
         if cur is None:
-            cur = [start, end, text]
+            cur = [start, end, text, [seg]]
         elif end - cur[0] <= WINDOW:
             cur[1], cur[2] = end, cur[2] + " " + text
+            cur[3].append(seg)
         else:
             out.append(tuple(cur))
-            cur = [start, end, text]
+            cur = [start, end, text, [seg]]
     if cur:
         out.append(tuple(cur))
     return out
+
+
+def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
+    """Choose a 4-10 s spoken passage inside a chunk. Returns (start, seconds, [(rel_start, rel_end, text)])."""
+    segs = chunk.get("segs") or [[chunk["start"], chunk["end"], chunk["text"]]]
+    qw = set(_words(query))
+    best = max(range(len(segs)), key=lambda i: (len(qw & set(_words(segs[i][2]))), -i))
+    start, end, picked = segs[best][0], segs[best][1], [segs[best]]
+    for seg in segs[best + 1:]:
+        if end - start >= min_s or seg[1] - start > max_s:
+            break
+        picked.append(seg)
+        end = seg[1]
+    end = min(end, start + max_s)
+    rel = [(max(0.0, a - start), min(b, end) - start, t) for a, b, t in picked if a < end]
+    return start, round(end - start + 0.15, 2), rel
 
 
 def index(folder, lib, whisper="small", use_embeddings=True):
@@ -45,8 +64,9 @@ def index(folder, lib, whisper="small", use_embeddings=True):
             continue
         log(f"[{n}/{len(videos)}] indexing {os.path.basename(video)}")
         data["chunks"] = [c for c in data["chunks"] if c["file"] != video]
-        for start, end, text in _chunks(transcribe(video, whisper)):
-            data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2), "text": text})
+        for start, end, text, segs in _chunks(transcribe(video, whisper)):
+            data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2),
+                                   "text": text, "segs": segs})
         data["files"][video] = stamp
         write_json(path, data)  # save after every file so a long run can resume
 

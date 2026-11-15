@@ -1,10 +1,20 @@
 """Embed src/* into installer.template.ps1 -> Setup-PodcastStudio.ps1 (single self-contained file)."""
 import pathlib
+import subprocess
+import sys
 
 here = pathlib.Path(__file__).parent
+
+if "--no-test" not in sys.argv:  # never ship an installer whose tests fail
+    code = subprocess.run([sys.executable, str(here / "tests" / "run_tests.py")]).returncode
+    if code == 2:
+        print("WARNING: tests skipped (ffmpeg missing)")
+    elif code:
+        raise SystemExit("Tests failed - installer not built. (--no-test to override)")
+
 order = ["PodcastStudio.ps1", "Test-PodcastStudio.ps1", "common.py", "llm.py", "library.py", "visuals.py",
-         "tts.py", "pipeline.py", "assemble.py", "captions.py", "extract_voice.py", "fal_generate.py",
-         "selftest.py", "CLAUDE.md"]
+         "subs.py", "tts.py", "pipeline.py", "assemble.py", "qa.py", "stylebible.py", "captions.py",
+         "extract_voice.py", "fal_generate.py", "selftest.py", "CLAUDE.md"]
 missing = {p.name for p in (here / "src").iterdir() if p.is_file()} - set(order)
 assert not missing, f"not embedded: {missing}"
 blocks = []

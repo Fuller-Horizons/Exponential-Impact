@@ -10,6 +10,7 @@ from common import log
 
 HOST = os.environ.get("OLLAMA_HOST_URL", "http://127.0.0.1:11434")
 DEFAULT_MODEL = "gemma3:4b"
+FALLBACK_MODELS = ["gemma3:4b", "qwen3:4b", "phi4-mini", "llama3.2:3b"]
 EMBED_MODEL = "nomic-embed-text"
 
 
@@ -66,10 +67,36 @@ def ensure_model(name):
     subprocess.run(["ollama", "pull", name], check=True)
 
 
-def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192):
-    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage."""
+def _installed(name, have):
+    return name in have or (":" not in name and name + ":latest" in have)
+
+
+def pick_model(preferred=DEFAULT_MODEL):
+    """Return a usable chat model: the preferred one, else pull it, else any installed fallback."""
     ensure_server()
-    ensure_model(model)
+    have = models()
+    if _installed(preferred, have):
+        return preferred
+    try:
+        ensure_model(preferred)
+        return preferred
+    except Exception as e:  # unknown name, offline...
+        log(f"Could not get model {preferred} ({e}).")
+    chat_models = [h for h in have if "embed" not in h]
+    for cand in FALLBACK_MODELS + chat_models:
+        if _installed(cand, have):
+            log(f"Using installed model {cand} instead.")
+            return cand
+    raise RuntimeError(f"No local chat model is installed. Run: ollama pull {DEFAULT_MODEL}")
+
+
+def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192, schema=None):
+    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage.
+
+    `schema` (a JSON schema dict) makes Ollama constrain the reply to that shape; older Ollama
+    versions that reject it fall back to plain JSON mode.
+    """
+    model = pick_model(model)
     payload = {
         "model": model,
         "stream": False,
@@ -77,10 +104,19 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "options": {"temperature": temperature, "num_ctx": num_ctx},
     }
-    if as_json:
+    if schema:
+        as_json = True
+        payload["format"] = schema
+    elif as_json:
         payload["format"] = "json"
     try:
-        out = _post("/api/chat", payload)
+        try:
+            out = _post("/api/chat", payload)
+        except urllib.error.HTTPError as e:
+            if not (schema and e.code == 400):
+                raise
+            payload["format"] = "json"
+            out = _post("/api/chat", payload)
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Ollama error {e.code}: {e.read().decode('utf-8', 'ignore')[:300]}")
     text = out.get("message", {}).get("content", "").strip()

@@ -10,6 +10,8 @@
   Run (normal PowerShell window, not admin):
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-PodcastStudio.ps1
   Options: -Root D:\PodcastStudio  -Model gemma3:4b  -SkipModels  -SkipClaude  -CpuOnly  -WithStills  -Upgrade
+           -CheckOnly   (look at this PC and the network, install nothing)
+  A full log of every run is saved to <Root>\logs\install-<time>.log.
   Safe to re-run. Versions are pinned: a re-run reinstalls the exact set recorded in requirements.lock
   unless you pass -Upgrade.
 #>
@@ -20,7 +22,8 @@ param(
     [switch]$SkipClaude,
     [switch]$CpuOnly,
     [switch]$WithStills,
-    [switch]$Upgrade
+    [switch]$Upgrade,
+    [switch]$CheckOnly
 )
 # Pinned upstream versions (verified to resolve together for Windows / Python 3.11)
 $Pins = @{
@@ -28,10 +31,30 @@ $Pins = @{
     'Qwen3-TTS'    = @{ repo = 'QwenLM/Qwen3-TTS';           sha = '022e286b98fbec7e1e916cb940cdf532cd9f488e' }
 }
 $PyPins = 'faster-whisper==1.2.1', 'diffusers==0.39.0', 'pillow==13.0.0', 'fal-client==1.0.3',
-          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6'
+          'huggingface_hub==0.36.2', 'soundfile==0.14.0', 'numpy==2.2.6', 'opencv-python-headless==4.12.0.88'
+$ModelFallbacks = 'gemma3:4b', 'qwen3:4b', 'phi4-mini', 'llama3.2:3b'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
+$logName = 'install-' + $started.ToString('yyyyMMdd-HHmmss') + '.log'
+$tempLog = Join-Path $env:TEMP "PodcastStudio-$logName"
+try { Start-Transcript -Path $tempLog -Force | Out-Null } catch { }
+function Save-Log {
+    try { Stop-Transcript | Out-Null } catch { }
+    try {
+        $dir = Join-Path $Root 'logs'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Copy-Item $tempLog (Join-Path $dir $logName) -Force
+        Write-Host "Log saved: $(Join-Path $dir $logName)"
+    } catch { Write-Host "Log saved: $tempLog" }
+}
+trap {
+    Write-Host "`nINSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "At: $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
+    Save-Log
+    Write-Host 'Fix the problem above and run this script again - finished steps are skipped or quick.' -ForegroundColor Yellow
+    exit 1
+}
 
 function Step([string]$m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Ok([string]$m)   { Write-Host "    [ok] $m" -ForegroundColor Green }
@@ -56,15 +79,40 @@ function Native([string]$what, [scriptblock]$cmd, [switch]$Soft) {
 Step 'Checking this PC'
 if (-not (Has 'winget')) { throw "winget is missing. Install 'App Installer' from the Microsoft Store, then re-run." }
 if (Has 'nvidia-smi') {
-    $gpu = (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader) -join '; '
+    $gpu = (& nvidia-smi '--query-gpu=name,memory.total,driver_version' '--format=csv,noheader') -join '; '
     Ok "GPU: $gpu"
 } else {
     Warn 'nvidia-smi not found: update the NVIDIA driver for GPU voice cloning. Continuing (CPU works, slower).'
 }
-$ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+$gb = 1024 * 1024 * 1024
+$ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / $gb)
 Ok "RAM: $ramGb GB"
 $drive = Get-PSDrive -Name ($Root.Substring(0, 1))
-if ($drive.Free -lt 25GB) { Warn ("Only {0:N0} GB free on {1}: - need ~20 GB (PyTorch + models)." -f ($drive.Free / 1GB), $drive.Name) }
+$freeGb = [math]::Round($drive.Free / $gb)
+if ($freeGb -lt 25) { Warn "Only $freeGb GB free on drive $($drive.Name) - need about 20 GB (PyTorch + models)." } else { Ok "Disk: $freeGb GB free" }
+
+Step 'Checking the network (hosts the installer downloads from)'
+$hosts = [ordered]@{ 'github.com' = 'code'; 'pypi.org' = 'Python packages'; 'download.pytorch.org' = 'PyTorch';
+                     'huggingface.co' = 'voice and speech models'; 'ollama.com' = 'language model' }
+foreach ($h in $hosts.Keys) {
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $ok = $c.BeginConnect($h, 443, $null, $null).AsyncWaitHandle.WaitOne(4000) -and $c.Connected
+        $c.Close()
+    } catch { $ok = $false }
+    if ($ok) { Ok "$h ($($hosts[$h]))" } else { Warn "cannot reach $h - needed for $($hosts[$h])" }
+}
+if ($CheckOnly) {
+    Step 'Already installed'
+    foreach ($c in 'git', 'python', 'py', 'node', 'ffmpeg', 'yt-dlp', 'deno', 'ollama', 'claude') {
+        if (Has $c) { Ok $c } else { Write-Host "    [  ] $c (will be installed)" }
+    }
+    if (Test-Path (Join-Path $Root 'venv\Scripts\python.exe')) { Ok "existing install at $Root" } else { Write-Host "    [  ] no install at $Root yet" }
+    Write-Host "`nCheck only - nothing was installed. Run again without -CheckOnly to install." -ForegroundColor Green
+    try { Stop-Transcript | Out-Null } catch { }
+    Write-Host "Log saved: $tempLog"
+    exit 0
+}
 
 # ------------------------------------------------------------------ 2. system tools
 Step 'Installing system tools (winget)'
@@ -170,7 +218,14 @@ if (-not $SkipModels) {
             }
         }
         if ($up) {
-            Native "ollama pull $Model" { & ollama pull $Model } -Soft | Out-Null
+            $got = $null
+            foreach ($m in (@($Model) + $ModelFallbacks | Select-Object -Unique)) {
+                if (Native "ollama pull $m" { & ollama pull $m } -Soft) { $got = $m; break }
+            }
+            if ($got) {
+                if ($got -ne $Model) { Warn "$Model was not available - using $got instead"; $Model = $got }
+                Ok "language model: $Model"
+            } else { Warn 'No language model could be downloaded. Later, run: ollama pull <model name>' }
             Native 'ollama pull nomic-embed-text' { & ollama pull nomic-embed-text } -Soft | Out-Null
         } else { Warn 'Ollama did not start - open the Ollama app, then re-run this script.' }
     } else { Warn 'Ollama not on PATH yet - open a new PowerShell window and re-run.' }
@@ -225,4 +280,5 @@ if ($LASTEXITCODE -eq 0) { Ok 'self-test passed' } else { Warn "self-test report
 $mins = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 Write-Host "`nDone in $mins min. Launching Podcast Studio..." -ForegroundColor Green
 Write-Host "Next: Voice clone tab > extract a voice sample; Create tab > Index footage, then type a prompt."
+Save-Log
 Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$gui`""
