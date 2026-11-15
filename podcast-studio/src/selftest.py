@@ -177,6 +177,7 @@ def main():
     check("active-speaker model (LR-ASD)", speaker_model, required=False)
     log("Optional extras")
     check("WhisperX (exact word timing)", lambda: whisperx_exe() or "not installed (built-in word timing is used)", required=False)
+    check("Codex (optional editor)", tool("codex"), required=False)
     check("MuseTalk (lip-sync)", lambda: "installed" if __import__("lipsync").available() else "not installed (lip-sync is off)",
           required=False)
     log("Local language model")

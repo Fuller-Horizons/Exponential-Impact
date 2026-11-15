@@ -72,13 +72,36 @@ function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
     [System.IO.File]::AppendAllText($file, "- $text`n")
     return $true
 }
-function Start-Claude([string]$dir, [string]$promptFile) {
-    # Opens Claude Code in its own window with the prompt read from a file (no quoting problems)
-    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.'; return $false }
-    $safe = $promptFile -replace "'", "''"
-    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "claude (Get-Content -Raw -LiteralPath '$safe')"
+function Get-ServicesBlock([string]$project, [string]$editor) {
+    # The project's service rules (which outside services are allowed, caps, spend so far), added to every agent prompt
+    if (-not $project -or -not (Test-Path $Py)) { return '' }
+    $text = & $Py -u (Join-Path $App 'services.py') block --project $project --editor $editor 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) { return '' }
+    return $text
+}
+function Start-Agent([string]$dir, [string]$promptFile, [string]$editor = 'claude', [string]$project = '') {
+    # Opens Claude Code or Codex in its own window with the prompt read from a file (no quoting problems)
+    $exe = if ($editor -eq 'codex') { 'codex' } else { 'claude' }
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+        if ($editor -eq 'codex') { Msg 'Codex is not installed. Re-run the installer with -WithCodex, then run "codex" once and choose "Sign in with ChatGPT".' }
+        else { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.' }
+        return $false
+    }
+    $run = $promptFile
+    $lighter = ''
+    if ($project) {
+        $rules = Get-ServicesBlock $project $editor
+        $run = [System.IO.Path]::ChangeExtension($promptFile, '.run.txt')
+        [System.IO.File]::WriteAllText($run, [System.IO.File]::ReadAllText($promptFile) + "`n" + $rules)
+        # No paid service allowed: ask Claude Code not to load the account's connectors (less memory). This setting
+        # is reported by third parties, not confirmed by Anthropic; if it is ignored the prompt still forbids them.
+        if ($editor -eq 'claude' -and $rules -notmatch 'allowed, up to') { $lighter = "`$env:ENABLE_CLAUDEAI_MCP_SERVERS='false'; " }
+    }
+    $safe = $run -replace "'", "''"
+    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "$lighter$exe (Get-Content -Raw -LiteralPath '$safe')"
     return $true
 }
+function Start-Claude([string]$dir, [string]$promptFile, [string]$project = '') { return (Start-Agent $dir $promptFile 'claude' $project) }
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
 $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
@@ -434,8 +457,11 @@ $rTight.Text = 'Remove pauses here first'; $rTight.Checked = $true
 $rTight.Location = New-Object System.Drawing.Point(662, 47); $rTight.Size = New-Object System.Drawing.Size(250, 24)
 $tR.Controls.Add($rTight)
 $rPrompt = Add-Text $tR 150 165 760 '' 175
-$lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
+$lr = Add-Label $tR 'What the editor will be asked (you can edit it)' 10 165 135
 $lr.Size = New-Object System.Drawing.Size(135, 80)
+Add-Label $tR 'Editor' 10 255 135 | Out-Null
+$rEditor = Add-Combo $tR 10 280 135 @('Claude Code', 'Codex (ChatGPT)')
+function Get-Editor { if ($rEditor.SelectedIndex -eq 1) { return 'codex' } else { return 'claude' } }
 
 function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
 function Get-RecordingProject {
@@ -458,14 +484,15 @@ $b.Add_Click({
     if ($rTight.Checked) { $argv += '--tighten' }
     Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' $argv { Load-RecordingPrompt }
 })
-$b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
+$b = Add-Button $tR '2. Edit with the editor' 380 85 200
 $b.Add_Click({
     $proj = Get-RecordingProject
     if (-not $proj -or -not (Test-Path (Join-Path $proj 'assets\raw.json'))) { Msg 'Press "1. Prepare" first.'; return }
     if (-not $rPrompt.Text.Trim()) { Load-RecordingPrompt }
     $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
     [System.IO.File]::WriteAllText($pf, ($rPrompt.Text -replace "`r`n", "`n"))
-    if (Start-Claude $Kit $pf) { Log "Claude Code opened in $Kit. Its window shows the edit; answer its questions there." }
+    $ed = Get-Editor
+    if (Start-Agent $Kit $pf $ed $proj) { Log "$([string]$rEditor.SelectedItem) opened in $Kit. Its window shows the edit; answer its questions there." }
 })
 $b = Add-Button $tR 'Open project folder' 590 85 160
 $b.Add_Click({ $proj = Get-RecordingProject; if ($proj -and (Test-Path $proj)) { Start-Process explorer.exe $proj } else { Msg 'Nothing prepared yet.' } })
@@ -804,12 +831,119 @@ $b.Add_Click({
     [System.IO.File]::WriteAllText($pf, ("Read script.txt, then social/linkedin.txt, social/x-thread.txt and social/carousel.txt. " +
         "Rewrite the three posts so they are sharper and sound like this show, keeping every claim true to script.txt. " +
         "Follow every rule in $RulesFile if it exists. Save over the same three files and show me what changed. Do not post anything anywhere."))
-    [void](Start-Claude $dir $pf)
+    [void](Start-Claude $dir $pf $dir)
 })
 $nP = Add-Label $tP ('Nothing leaves this PC until you press Upload and confirm. Videos upload as private unless you change Privacy. ' +
     'One-time setup: in Google Cloud Console create a project, enable "YouTube Data API v3", create an OAuth client of type "Desktop app", ' +
     'download its JSON file and choose it with "YouTube sign-in file...". Social posts are drafts in the project''s social folder; nothing is posted.') 150 360 760
 $nP.Size = New-Object System.Drawing.Size(760, 80)
+
+# ================================================================ TAB: Services (optional, per project; everything works with all off)
+$tV = New-Tab 'Services'
+Add-Label $tV 'Settings for' 10 12 | Out-Null
+$vScope = Add-Combo $tV 150 12 250 @('the Create tab project', 'the Edit recording project')
+$vWhich = Add-Label $tV '' 410 12 380
+$b = Add-Button $tV 'Load' 800 10 110
+$b.Add_Click({ Load-Services $false })
+$vHigg = New-Object System.Windows.Forms.CheckBox
+$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vHigg)
+Add-Label $tV 'cap' 275 50 30 | Out-Null
+$vHiggCap = Add-Text $tV 305 50 55 '200'
+Add-Label $tV 'credits. Generated B-roll, dubbing, upscaling, reframing.' 365 50 545 | Out-Null
+$vVid = New-Object System.Windows.Forms.CheckBox
+$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vVid)
+Add-Label $tV 'cap' 275 85 30 | Out-Null
+$vVidCap = Add-Text $tV 305 85 55 '100'
+Add-Label $tV 'credits. Topic ideas, title scores, thumbnails, music beds.' 365 85 545 | Out-Null
+$vDrive = New-Object System.Windows.Forms.CheckBox
+$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vDrive)
+$vFolder = Add-Text $tV 275 120 515
+$b = Add-Button $tV 'Drive folder...' 800 118 110
+$b.Add_Click({ $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq 'OK') { $vFolder.Text = $d.SelectedPath } })
+$b = Add-Button $tV 'Save for this project' 150 158 180
+$b.Add_Click({ [void](Save-Services $false) })
+$b = Add-Button $tV 'Save as my default' 340 158 160
+$b.Add_Click({ [void](Save-Services $true) })
+$vSpent = Add-Label $tV '' 510 162 400
+
+function Get-ServicesProject([bool]$quiet) {
+    if ($vScope.SelectedIndex -eq 1) {
+        $p = Get-RecordingProject
+        if (-not $p -or -not (Test-Path (Join-Path $p 'assets'))) { if (-not $quiet) { Msg 'Prepare the recording in the Edit recording tab first.' }; return $null }
+        return $p
+    }
+    return (Get-Project)
+}
+function Load-Services([bool]$quiet) {
+    $p = Get-ServicesProject $quiet; if (-not $p) { return }
+    $vWhich.Text = Split-Path $p -Leaf
+    $raw = & $Py -u (Join-Path $App 'services.py') json --project $p 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $raw.Trim()) { if (-not $quiet) { Msg 'Could not read the service settings.' }; return }
+    $c = $raw | ConvertFrom-Json
+    $vHigg.Checked = [bool]$c.services.higgsfield; $vVid.Checked = [bool]$c.services.vidiq; $vDrive.Checked = [bool]$c.services.drive
+    $vHiggCap.Text = [string]$c.caps.higgsfield; $vVidCap.Text = [string]$c.caps.vidiq; $vFolder.Text = [string]$c.drive_folder
+    $vSpent.Text = "Used so far: Higgsfield $($c.spent.higgsfield), vidIQ $($c.spent.vidiq) credits"
+}
+function Save-Services([bool]$asDefault) {
+    $p = Get-ServicesProject $false; if (-not $p) { return $false }
+    foreach ($cap in $vHiggCap.Text, $vVidCap.Text) { if ($cap -notmatch '^\d+$') { Msg 'Credit caps must be whole numbers.'; return $false } }
+    $on = @(); $off = @()
+    if ($vHigg.Checked) { $on += 'higgsfield' } else { $off += 'higgsfield' }
+    if ($vVid.Checked) { $on += 'vidiq' } else { $off += 'vidiq' }
+    if ($vDrive.Checked) { $on += 'drive' } else { $off += 'drive' }
+    $argv = @('-u', (Join-Path $App 'services.py'), 'set', '--project', $p, '--cap-higgsfield', $vHiggCap.Text,
+        '--cap-vidiq', $vVidCap.Text, '--drive-folder', $vFolder.Text)
+    if ($on) { $argv += @('--on') + $on }
+    if ($off) { $argv += @('--off') + $off }
+    if ($asDefault) { $argv += '--default' }
+    $out = & $Py @argv 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg ("Could not save: " + $out.Trim()); return $false }
+    Log ("Services saved for $(Split-Path $p -Leaf)" + $(if ($asDefault) { ' and as your default for new projects.' } else { '.' }))
+    Load-Services $true
+    return $true
+}
+$vScope.Add_SelectedIndexChanged({ Load-Services $true })
+
+$hdr = Add-Label $tV 'Optional tasks for the Create tab project. Each opens Claude Code; it tells you the cost and waits for your yes before any paid step.' 10 205 900
+$hdr.Size = New-Object System.Drawing.Size(900, 24)
+function Start-ServiceTask([string]$kind, [string[]]$extra = @()) {
+    $dir = Get-Project; if (-not $dir) { return }
+    $out = & $Py -u (Join-Path $App 'services.py') task --project $dir --kind $kind @extra 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg (($out -split "`n" | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1) -replace '^ERROR:\s*', ''); return }
+    $taskFile = ($out -split "`n" | Where-Object { $_ -match '^TASK: ' } | Select-Object -First 1) -replace '^TASK:\s*', ''
+    if (Start-Claude $dir $taskFile.Trim()) { Log "Claude Code opened for the $kind task. Answer its questions in its window." }
+}
+$b = Add-Button $tV 'Ideas (vidIQ)' 150 235 160
+$b.Add_Click({ Start-ServiceTask 'ideas' })
+$b = Add-Button $tV 'Title + thumbnail (vidIQ)' 320 235 200
+$b.Add_Click({ Start-ServiceTask 'package' })
+$b = Add-Button $tV 'Music bed (vidIQ)' 530 235 160
+$b.Add_Click({ Start-ServiceTask 'music' })
+Add-Label $tV 'Scene' 150 275 45 | Out-Null
+$vScene = Add-Text $tV 198 275 40 '1'
+$b = Add-Button $tV 'Generated B-roll (Higgsfield)' 245 273 220
+$b.Add_Click({ Start-ServiceTask 'broll' @('--scene', $vScene.Text) })
+$vLang = Add-Combo $tV 480 275 130 @('spa Spanish', 'por Portuguese', 'fra French', 'deu German', 'ita Italian', 'hin Hindi', 'jpn Japanese', 'kor Korean', 'cmn Chinese', 'ara Arabic', 'rus Russian', 'tur Turkish', 'pol Polish', 'ind Indonesian', 'fil Filipino', 'swe Swedish', 'fin Finnish', 'eng English')
+$b = Add-Button $tV 'Dub (Higgsfield)' 620 273 150
+$b.Add_Click({ Start-ServiceTask 'dub' @('--language', ([string]$vLang.SelectedItem).Substring(0, 3)) })
+$b = Add-Button $tV 'Copy to Drive folder' 150 313 180
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py 'Copy finished files to the Drive folder' 'services.py' @('drive', '--project', $dir)
+})
+$b = Add-Button $tV 'Open spending log' 340 313 160
+$b.Add_Click({
+    $p = Get-ServicesProject $false; if (-not $p) { return }
+    $f = Join-Path $p 'services-log.md'
+    if (Test-Path $f) { Start-Process notepad.exe $f } else { Msg 'No paid service has been used for this project yet.' }
+})
+$nV = Add-Label $tV ('Everything in Podcast Studio works with all of these off, which is the default. Higgsfield and vidIQ are connected to your Claude account, so ' +
+    'only Claude Code can use them; Codex cannot. Caps are instructions Claude follows and logs against, not limits the services enforce. ' +
+    'Uploading to a service sends your footage to that company.') 10 355 900
+$nV.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab 'Analyze'
@@ -1107,7 +1241,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 9) "expected 9 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 10) "expected 10 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1243,6 +1377,26 @@ Check 'recording tab and house rules' {
     Expect ($text -match '# House rules' -and $text -match '- Never open with a greeting\.' -and $text -match '- Keep hooks under ten words\.') 'rules file content is wrong'
     Show-RuleDialog
     'slug, project path, type and rules file'
+}
+Check 'services are off by default and save per project' {
+    $vScope.SelectedIndex = 0
+    Load-Services $true
+    Expect (-not $vHigg.Checked -and -not $vVid.Checked -and -not $vDrive.Checked) 'services must start switched off'
+    $vVid.Checked = $true; $vVidCap.Text = '40'
+    Expect (Save-Services $false) 'saving failed'
+    $saved = [System.IO.File]::ReadAllText((Join-Path $smokeDir 'services.json')) | ConvertFrom-Json
+    Expect ($saved.services.vidiq -and -not $saved.services.higgsfield -and $saved.caps.vidiq -eq 40) 'saved switches are wrong'
+    $rules = Get-ServicesBlock $smokeDir 'claude'
+    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: OFF') 'prompt rules do not follow the switches'
+    Expect ((Get-ServicesBlock $smokeDir 'codex') -match 'only connected to Claude') 'Codex must be told vidIQ is not available to it'
+    $vVid.Checked = $false
+    [void](Save-Services $false)
+    $out = & $Py -u (Join-Path $App 'services.py') task --project $smokeDir --kind ideas 2>&1 | Out-String
+    Expect ($LASTEXITCODE -ne 0 -and $out -match 'is off for this project') 'a task must refuse while its service is off'
+    $rEditor.SelectedIndex = 1
+    Expect ((Get-Editor) -eq 'codex') 'editor box does not map to Codex'
+    $rEditor.SelectedIndex = 0
+    'off by default, saved per project, rules reach the prompt, tasks refuse when off'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

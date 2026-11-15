@@ -14,6 +14,7 @@
   Options: -Root D:\PodcastStudio  -Model gemma3:4b  -SkipModels  -SkipClaude  -CpuOnly  -WithStills  -Upgrade
            -CheckOnly   (look at this PC and the network, install nothing)
            -WithWhisperX  optional: more exact word timing (and who-said-what if HF_TOKEN is set). About 5 GB more.
+           -WithCodex     optional: OpenAI Codex as a second editor (signs in with your ChatGPT plan).
            -WithLipSync   optional: MuseTalk lip-sync in its own Python 3.10 environment. About 10 GB more, slow
                           on a 4 GB card, and the least-tested part of this installer.
   A full log of every run is saved to <Root>\logs\install-<time>.log.
@@ -30,7 +31,8 @@ param(
     [switch]$Upgrade,
     [switch]$CheckOnly,
     [switch]$WithWhisperX,
-    [switch]$WithLipSync
+    [switch]$WithLipSync,
+    [switch]$WithCodex
 )
 # Pinned upstream versions (verified to resolve together for Windows / Python 3.11)
 $Pins = @{
@@ -324,6 +326,16 @@ if ($WithLipSync) {
     }
     if ($lipOk -and (Test-Path (Join-Path $mt 'models\musetalkV15\unet.pth'))) { Ok 'MuseTalk installed (tick Lip-sync in the Create tab to use it)' }
     else { Warn 'MuseTalk did not install completely - lip-sync stays off. Everything else is unaffected.' }
+}
+
+if ($WithCodex) {
+    Step 'Codex (optional second editor, uses your ChatGPT plan)'
+    if (Has 'npm') {
+        if (Native 'npm i -g @openai/codex' { & npm install -g '@openai/codex' --silent } -Soft) {
+            Refresh-Path
+            Ok 'Codex installed. Run "codex" once and choose "Sign in with ChatGPT".'
+        } else { Warn 'Codex did not install. Claude Code stays the editor.' }
+    } else { Warn 'npm is missing, so Codex was not installed.' }
 }
 
 # ------------------------------------------------------------------ 8. app files

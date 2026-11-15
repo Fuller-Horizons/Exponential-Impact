@@ -78,6 +78,18 @@ press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file f
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
 optional fal.ai tab for cloud clips. Claude Code buttons are optional extras.
 
+## Optional services (all off unless you switch them on)
+The **Services** tab switches outside services on per project, with a credit cap for each paid one. Nothing in
+the app needs them; switched-off services are named in every Claude Code prompt as not allowed.
+- **Higgsfield** (Claude only): generated B-roll for a scene, dubbing into 18 languages.
+- **vidIQ** (Claude only): topic ideas, title scores and a thumbnail, a music bed.
+- **Google Drive**: copies finished files into a folder that Google Drive for desktop syncs. No connector needed.
+- **Codex** (installer `-WithCodex`): choose it as the editor in the Edit recording tab; it signs in with your
+  ChatGPT plan. It cannot use Higgsfield or vidIQ, which are connected to Claude.
+
+Each paid step quotes its cost and waits for a yes, and every paid call is written to the project's
+`services-log.md`. Caps are instructions Claude follows, not limits the services themselves enforce.
+
 ## Built for a modest PC (i7, 16 GB RAM, 4 GB graphics card)
 - **Long recordings are cut piece by piece.** One ffmpeg filter graph with many cuts went past 13 GB on a
   10-minute 1080p test and was killed; one piece at a time stays under 0.5 GB. Claude Code is told to use the

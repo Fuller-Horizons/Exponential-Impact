@@ -811,6 +811,75 @@ def working_copies_of_4k_footage():
 
 
 @test
+def optional_services_per_project():
+    import services
+    ws = os.path.join(WORK, "ws")
+    proj = os.path.join(ws, "projects", "svc")
+    os.makedirs(proj, exist_ok=True)
+    open(os.path.join(proj, "prompt.txt"), "w").write("why cash flow matters")
+    cfg = services.load(proj)
+    assert not any(cfg["services"].values()), "every service starts off"
+    rules = services.block(proj)
+    assert "Higgsfield: OFF" in rules and "vidIQ: OFF" in rules and "Before every paid call" not in rules
+    for kind in services.TASKS:
+        try:
+            services.task(proj, kind, scene=1, language="spa")
+        except SystemExit:
+            continue
+        raise AssertionError(f"{kind} must refuse while its service is off")
+    # defaults, then a project override
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", proj, "--on", "vidiq", "--cap-vidiq", "30", "--default", env=ENV)
+    other = os.path.join(ws, "projects", "other")
+    os.makedirs(other, exist_ok=True)
+    assert services.load(other)["services"]["vidiq"], "the default applies to new projects"
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", other, "--off", "vidiq", env=ENV)
+    assert not services.load(other)["services"]["vidiq"] and services.load(proj)["services"]["vidiq"]
+    rules = services.block(proj)
+    assert "vidIQ: allowed, up to 30 credits (0 already used)" in rules and "Before every paid call" in rules
+    assert "only connected to Claude" in services.block(proj, "codex")
+    path = services.task(proj, "ideas")
+    text = open(path).read()
+    assert "vidiq_keyword_research" in text and "ideas.md" in text and "why cash flow matters" in text and "up to 30" in text
+    # spending is read back from the log and stops new tasks at the cap
+    with open(os.path.join(proj, "services-log.md"), "w") as f:
+        f.write("- 2026-11-15 vidiq vidiq_outliers: 5 credits - ideas\n- 2026-11-15 vidiq vidiq_score_title: 25 credits - titles\n"
+                "- 2026-11-15 drive copy: 0 credits - x\n")
+    assert services.spent(proj) == {"higgsfield": 0, "vidiq": 30}
+    assert "used 30 of its 30" in sh(PY, os.path.join(SRC, "services.py"), "task", "--project", proj, "--kind", "ideas", env=ENV, ok=1)
+    # Higgsfield B-roll for a real project scene, and dubbing
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", PROJECT, "--on", "higgsfield", "drive", env=ENV)
+    broll = open(services.task(PROJECT, "broll", scene=1)).read()
+    assert "get_cost" in broll and "generated" in broll and "scenes.py" in broll and "--index 1" in broll
+    assert "soundbite" in sh(PY, os.path.join(SRC, "services.py"), "task", "--project", PROJECT, "--kind", "broll", "--scene",
+                             str(next(i for i, s in enumerate(json.load(open(os.path.join(PROJECT, "script.json")))["scenes"], 1)
+                                      if s["visual"] == "soundbite")), env=ENV, ok=1)
+    assert "final.spa.mp4" in open(services.task(PROJECT, "dub", language="spa")).read()
+    # a generated clip replaces one scene's picture and keeps its voice
+    clip = os.path.join(WORK, "generated.mp4")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1080x1920:r=30:d=2", "-c:v", "libx264", clip)
+    card = next(i for i, s in enumerate(json.load(open(os.path.join(PROJECT, "script.json")))["scenes"], 1) if s["visual"] == "card")
+    voice = os.path.join(PROJECT, "voice", f"scene_{card:02}.wav")
+    before = os.path.getmtime(voice)
+    fields = os.path.join(WORK, "clip.json")
+    json.dump({"clip": clip}, open(fields, "w"))
+    sh(PY, os.path.join(SRC, "scenes.py"), "set", "--project", PROJECT, "--index", str(card), "--fields-file", fields, env=ENV)
+    s = json.load(open(os.path.join(PROJECT, "script.json")))["scenes"][card - 1]
+    assert s["visual"] == "footage" and s["generated"] and s["source"]["file"] == clip and os.path.getmtime(voice) == before
+    assert "[voice " not in pipeline_run("--stage", "all"), "the voice line is kept"
+    # Google Drive: a plain copy into a synced folder
+    assert "Choose your Google Drive folder" in sh(PY, os.path.join(SRC, "services.py"), "drive", "--project", PROJECT, env=ENV, ok=1)
+    drive = os.path.join(WORK, "GoogleDrive")
+    os.makedirs(drive)
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", PROJECT, "--drive-folder", drive, env=ENV)
+    sh(PY, os.path.join(SRC, "services.py"), "drive", "--project", PROJECT, env=ENV)
+    copied = os.listdir(os.path.join(drive, "demo"))
+    assert "final.mp4" in copied and "social" in copied, copied
+    assert services.spent(PROJECT)["higgsfield"] == 0, "Drive copies cost nothing"
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", PROJECT, "--off", "higgsfield", "drive", env=ENV)
+    os.remove(os.path.join(services.workspace(), "settings.json"))     # drop the test's default
+
+
+@test
 def e2e_missing_voice_is_reported():
     bad = os.path.join(WORK, "ws", "projects", "novoice")
     out = sh(PY, os.path.join(SRC, "pipeline.py"), "--project", bad, "--stage", "all", "--prompt", "x",

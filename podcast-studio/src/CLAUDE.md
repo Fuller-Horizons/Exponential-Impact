@@ -33,6 +33,12 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
 
+## Outside services (optional, per project)
+- Before using Higgsfield, vidIQ or any other outside service, read the project's rules: `python ..\app\services.py block --project <project folder>`.
+  A service that is off must not be used. Allowed services have a credit cap: quote each cost, wait for a yes, and log every paid call in the project's `services-log.md`.
+- Nothing in this app requires a service. If one fails or is off, use the local way.
+- A ready-made clip can replace a scene's picture: `scenes.py set --index N --fields-file f.json` with `{"clip": "<path>"}`.
+
 ## Memory (this PC: 16 GB RAM, 4 GB graphics card)
 - Never render cuts with one ffmpeg filter graph of many trim/atrim filters: it ran out of memory on a 10-minute
   1080p test. Use `python ..\app\recording.py render --video in.mp4 --keep keep.json --out out.mp4`

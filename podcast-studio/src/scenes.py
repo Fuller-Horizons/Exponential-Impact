@@ -1,7 +1,7 @@
 """Scene editor backend: change, re-make, add or delete one scene without redoing the rest.
 
   python scenes.py set    --project P --index 3 --fields-file edit.json   (fields: narration, visual, query,
-                                                                           card_text, image_prompt, layout)
+                                                                           card_text, image_prompt, layout, clip)
   python scenes.py remake --project P --index 3        (new voice take / next best footage / new still)
   python scenes.py add    --project P --index 3        (insert a card scene after scene 3)
   python scenes.py delete --project P --index 3
@@ -95,6 +95,19 @@ def main():
         for key in ("narration", "query", "card_text", "image_prompt"):
             if key in new:
                 s[key] = " ".join(str(new[key] or "").split())
+        if new.get("clip"):            # a ready-made clip (for example generated B-roll) shown for this scene
+            clip = os.path.abspath(str(new["clip"]))
+            if not os.path.exists(clip):
+                fail(f"Clip not found: {clip}")
+            if s["visual"] == "soundbite":
+                fail("A soundbite scene shows the hosts; choose a narrated scene for a clip.")
+            invalidate(project, n, voice=False)
+            s["visual"], s["source"], s["generated"] = "footage", {"file": clip, "start": 0}, True
+            s["layout"] = "auto"
+            script["edited"] = True
+            save(project, script)
+            log(f"Scene {n} now shows {os.path.basename(clip)} (voice kept)")
+            return
         if "layout" in new:
             layout = str(new["layout"] or "").lower()
             if layout and layout not in FRAMINGS:
