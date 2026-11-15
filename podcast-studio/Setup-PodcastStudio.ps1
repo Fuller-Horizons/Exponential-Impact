@@ -300,6 +300,15 @@ function Pick-File([string]$filter = 'All files|*.*', [string]$dir = $Work) {
     if ($d.ShowDialog() -eq 'OK') { return $d.FileName }
     return $null
 }
+# How episode footage is framed: label shown in the app -> value the pipeline understands
+$Framings = [ordered]@{
+    'Auto' = 'auto'; 'Stacked' = 'stack'; 'Side by side' = 'side'; 'Both in frame' = 'wide'
+    'One person' = 'single'; 'Left person' = 'single-left'; 'Right person' = 'single-right'
+}
+function Get-FramingLabel([string]$value) {
+    foreach ($k in $Framings.Keys) { if ($Framings[$k] -eq $value) { return $k } }
+    return ''
+}
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
 $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
@@ -473,7 +482,8 @@ function Get-ProjectArgs([string]$dir, [string]$stage) {
     $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
         '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
         '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }),
-        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }))
+        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }),
+        '--framing', $Framings[[string]$cFrame.SelectedItem])
     if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
     return $argv
 }
@@ -520,8 +530,10 @@ $b.Add_Click({
 Add-Label $t0 'Hook (pick one)' 10 218 | Out-Null
 $cHook = New-Object System.Windows.Forms.ComboBox
 $cHook.DropDownStyle = 'DropDownList'
-$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(520, 24)
+$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(325, 24)
 $t0.Controls.Add($cHook)
+Add-Label $t0 'Framing' 485 218 55 | Out-Null
+$cFrame = Add-Combo $t0 543 218 132 @($Framings.Keys)
 $cHook.Add_SelectedIndexChanged({
     if ($cHook.SelectedIndex -lt 0) { return }
     $lines = $cOutline.Text -split "`r?`n"
@@ -626,6 +638,8 @@ $eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font
 $tS.Controls.Add($eList)
 Add-Label $tS 'Type' 365 45 90 | Out-Null
 $eType = Add-Combo $tS 460 45 150 @('card', 'footage', 'soundbite', 'still')
+Add-Label $tS 'Framing' 625 45 60 | Out-Null
+$eLayout = Add-Combo $tS 690 45 220 (@('(video default)') + @($Framings.Keys))
 Add-Label $tS 'Narration' 365 80 90 | Out-Null
 $eNarr = Add-Text $tS 460 80 450 '' 95
 Add-Label $tS 'Search words' 365 183 90 | Out-Null
@@ -664,6 +678,8 @@ $eList.Add_SelectedIndexChanged({
     if ($i -lt 0 -or $i -ge $script:sceneData.Count) { return }
     $sc = $script:sceneData[$i]
     if ($eType.Items.Contains([string]$sc.visual)) { $eType.SelectedItem = [string]$sc.visual }
+    $label = Get-FramingLabel ([string]$sc.layout)
+    if ($label) { $eLayout.SelectedItem = $label } else { $eLayout.SelectedIndex = 0 }
     $eNarr.Text = [string]$sc.narration; $eQuery.Text = [string]$sc.query
     $eCard.Text = [string]$sc.card_text; $eImg.Text = [string]$sc.image_prompt
 })
@@ -673,7 +689,8 @@ $b.Add_Click({
     $n = Get-SceneNumber; if ($n -eq 0) { return }
     $dir = Get-Project; if (-not $dir) { return }
     $fields = [ordered]@{ narration = $eNarr.Text; visual = [string]$eType.SelectedItem; query = $eQuery.Text
-                          card_text = $eCard.Text; image_prompt = $eImg.Text }
+                          card_text = $eCard.Text; image_prompt = $eImg.Text
+                          layout = $(if ($eLayout.SelectedIndex -gt 0) { $Framings[[string]$eLayout.SelectedItem] } else { '' }) }
     $edit = Join-Path $dir 'edit.json'
     [System.IO.File]::WriteAllText($edit, ($fields | ConvertTo-Json))
     Run-Py "Save scene $n" 'scenes.py' @('set', '--project', $dir, '--index', "$n", '--fields-file', $edit) { Load-Scenes $true }
@@ -722,9 +739,8 @@ $b.Add_Click({
     $q = Join-Path $dir 'qa.json'
     if (Test-Path $q) { Start-Process notepad.exe $q } else { Msg 'No quality report yet.' }
 })
-$nS = Add-Label $tS ('Save scene stores your edit; nothing is rebuilt until you press "Apply changes". Only edited scenes are re-made: changing ' +
-    'card text keeps the voice line, changing narration re-records it. "Re-make this scene" gives a new voice take and, for footage or ' +
-    'soundbites, the next best matching moment.') 365 378 545
+$nS = Add-Label $tS ('Save scene stores your edit; press "Apply changes" to rebuild. Only edited scenes are re-made. ' +
+    '"Re-make this scene" gives a new voice take and the next best footage. Framing applies to footage and soundbites.') 365 378 545
 $nS.Size = New-Object System.Drawing.Size(545, 62)
 
 # ================================================================ TAB 1: Analyze
@@ -1043,23 +1059,30 @@ Check 'project arguments' {
     $dir = Get-Project
     Expect ($dir -eq $smokeDir) "unexpected project folder: $dir"
     $argv = @(Get-ProjectArgs $dir 'outline')
-    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites') {
+    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites', '--framing') {
         Expect ($argv -contains $need) "missing argument $need"
     }
+    $cFrame.SelectedItem = 'Side by side'
+    $argv = @(Get-ProjectArgs $dir 'outline')
+    Expect ($argv[[array]::IndexOf($argv, '--framing') + 1] -eq 'side') 'framing choice was not passed on'
+    $cFrame.SelectedIndex = 0
     Expect (Test-Path (Join-Path $dir 'prompt.txt')) 'prompt.txt was not written'
     $cPrompt.Text = ''
     "$($argv.Count) arguments"
 }
 Check 'scenes tab loads and selects' {
     $json = '{"title":"Smoke","scenes":[{"narration":"First line.","visual":"card","query":"q1","card_text":"Card one","image_prompt":""},' +
-            '{"narration":"","visual":"soundbite","query":"cash flow","card_text":"","image_prompt":""}]}'
+            '{"narration":"","visual":"soundbite","query":"cash flow","card_text":"","image_prompt":"","layout":"single-left"}]}'
     [System.IO.File]::WriteAllText((Join-Path $smokeDir 'script.json'), $json)
     Load-Scenes $true
     Expect ($eList.Items.Count -eq 2) "expected 2 scenes, list shows $($eList.Items.Count)"
     $eList.SelectedIndex = 0
     Expect ($eNarr.Text -eq 'First line.' -and $eCard.Text -eq 'Card one' -and [string]$eType.SelectedItem -eq 'card') 'scene 1 fields not filled in'
+    Expect ($eLayout.SelectedIndex -eq 0) 'scene 1 should show the video default framing'
     $eList.SelectedIndex = 1
     Expect ([string]$eType.SelectedItem -eq 'soundbite' -and $eQuery.Text -eq 'cash flow') 'scene 2 fields not filled in'
+    Expect ([string]$eLayout.SelectedItem -eq 'Left person') "scene 2 framing shows '$($eLayout.SelectedItem)'"
+    Expect ((Get-FramingLabel 'wide') -eq 'Both in frame' -and (Get-FramingLabel 'nope') -eq '') 'framing labels are wrong'
     Expect ((Get-SceneNumber) -eq 2) 'scene number is wrong'
     [string]$eList.Items[1]
 }
@@ -1747,12 +1770,14 @@ def _median(values):
     return values[len(values) // 2]
 
 
-def plan_layout(frames, vertical=True):
-    """Decide how to frame footage from detected faces.
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
+ASSUMED_HOSTS = ((0.27, 0.40), (0.73, 0.40))  # where two hosts usually sit when their faces cannot be found
 
-    ("stack", left, right)  two hosts side by side -> one above the other (vertical video only)
-    ("single", centre)      one speaker -> crop around them
-    ("center",)             no faces found -> plain centre crop
+
+def find_hosts(frames):
+    """(left, right, biggest): median face positions of two hosts side by side, and of the largest face.
+
+    left/right are None unless two well-separated, similar-sized faces show up in most frames.
     """
     with_faces = [f for f in frames if f]
     pairs = []
@@ -1762,14 +1787,45 @@ def plan_layout(frames, vertical=True):
         a, b = sorted(f, key=lambda face: -face[2])[:2]
         if abs(a[0] - b[0]) >= 0.25 and b[2] >= 0.5 * a[2]:
             pairs.append(sorted((a, b)))
-    if vertical and len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
+    left = right = biggest = None
+    if len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
         left = (_median([p[0][0] for p in pairs]), _median([p[0][1] for p in pairs]))
         right = (_median([p[1][0] for p in pairs]), _median([p[1][1] for p in pairs]))
-        return ("stack", left, right)
     if len(with_faces) >= 2:
-        biggest = [max(f, key=lambda face: face[2]) for f in with_faces]
-        return ("single", (_median([b[0] for b in biggest]), _median([b[1] for b in biggest])))
-    return ("center",)
+        big = [max(f, key=lambda face: face[2]) for f in with_faces]
+        biggest = (_median([b[0] for b in big]), _median([b[1] for b in big]))
+    return left, right, biggest
+
+
+def plan_layout(frames, vertical=True, choice="auto"):
+    """Decide how to frame footage.
+
+    choice        result
+    auto          stack when two hosts are found in a vertical video, else single, else centre
+    stack         ("stack", left, right)   one host above the other
+    side          ("side", left, right)    split screen, hosts next to each other
+    wide          ("wide", left, right)    both hosts in one frame (left/right may be None)
+    single        ("single", centre)       the larger face; ("center",) when no face is found
+    single-left   ("single", left)         the host on the left
+    single-right  ("single", right)        the host on the right
+    When a two-host choice is asked for and two faces cannot be found, typical seat positions are assumed.
+    """
+    left, right, biggest = find_hosts(frames)
+    if choice == "auto":
+        if vertical and left:
+            return ("stack", left, right)
+        return ("single", biggest) if biggest else ("center",)
+    if choice == "single":
+        return ("single", biggest) if biggest else ("center",)
+    if choice == "wide":
+        return ("wide", left, right)
+    if not left:
+        left, right = ASSUMED_HOSTS
+    if choice == "single-left":
+        return ("single", left)
+    if choice == "single-right":
+        return ("single", right)
+    return (choice, left, right)
 
 
 def crop_offsets(src_w, src_h, W, H, center=None, zoom=1.0):
@@ -1784,26 +1840,60 @@ def crop_offsets(src_w, src_h, W, H, center=None, zoom=1.0):
     return sw, sh, x, y
 
 
+def _even(n):
+    return max(2, int(n) // 2 * 2)
+
+
+def _pane(src_w, src_h, pw, ph, face, show, source, name):
+    """One host's box: zoomed so it shows about `show` of the original frame's width."""
+    zoom = max(1.0, (pw / (show * src_w)) / max(pw / src_w, ph / src_h))
+    sw, sh, x, y = crop_offsets(src_w, src_h, pw, ph, face, zoom)
+    return f"[{source}]scale={sw}:{sh},crop={pw}:{ph}:{x}:{y}[{name}]"
+
+
+def _backdrop(src_w, src_h, W, H, source):
+    """A blurred, darkened full-frame copy to sit behind a picture that does not fill the frame."""
+    sw, sh, x, y = crop_offsets(src_w, src_h, W, H)
+    return f"[{source}]scale={sw}:{sh},crop={W}:{H}:{x}:{y},boxblur=24:2,eq=brightness=-0.12[bg]"
+
+
 def footage_filter(src_w, src_h, W, H, layout):
     """ffmpeg filter graph ([0:v] -> [v]) for a layout from plan_layout."""
     tail = "fps=30,format=yuv420p,setsar=1[v]"
-    if layout[0] == "stack":
+    kind = layout[0]
+    if kind == "stack":
         half = H // 2
-        # zoom so each host's box shows roughly half the width of the original frame
-        zoom = max(1.0, (W / (0.55 * src_w)) / max(W / src_w, half / src_h))
-        parts = []
-        for name, face in (("top", layout[1]), ("bottom", layout[2])):
-            sw, sh, x, y = crop_offsets(src_w, src_h, W, half, face, zoom)
-            parts.append(f"[{name}0]scale={sw}:{sh},crop={W}:{half}:{x}:{y}[{name}]")
-        return "[0:v]split=2[top0][bottom0];" + ";".join(parts) + f";[top][bottom]vstack,{tail}"
+        return ("[0:v]split=2[top0][bottom0];"
+                + _pane(src_w, src_h, W, half, layout[1], 0.55, "top0", "top") + ";"
+                + _pane(src_w, src_h, W, half, layout[2], 0.55, "bottom0", "bottom")
+                + f";[top][bottom]vstack,{tail}")
+    if kind == "side":
+        pw = W // 2
+        ph = _even(H * 0.6) if H > W else H        # in a tall video the pair sits in a band, not two thin strips
+        panes = (_pane(src_w, src_h, pw, ph, layout[1], 0.45, "l0", "l") + ";"
+                 + _pane(src_w, src_h, pw, ph, layout[2], 0.45, "r0", "r"))
+        if ph == H:
+            return f"[0:v]split=2[l0][r0];{panes};[l][r]hstack,{tail}"
+        return (f"[0:v]split=3[bg0][l0][r0];{_backdrop(src_w, src_h, W, H, 'bg0')};{panes};[l][r]hstack[fg];"
+                f"[bg][fg]overlay=0:{int((H - ph) * 0.38)},{tail}")
+    if kind == "wide":
+        left, right = (layout[1], layout[2]) if len(layout) > 2 else (None, None)
+        x0, x1 = (max(0.0, left[0] - 0.24), min(1.0, right[0] + 0.24)) if left else (0.0, 1.0)
+        cw, cx = _even((x1 - x0) * src_w), int(x0 * src_w)
+        h2 = _even(W * src_h / cw)
+        if h2 < H:  # the two-shot is wider than the frame: show all of it over a blurred backdrop
+            return (f"[0:v]split=2[bg0][fg0];{_backdrop(src_w, src_h, W, H, 'bg0')};"
+                    f"[fg0]crop={cw}:{src_h}:{cx}:0,scale={W}:{h2}[fg];"
+                    f"[bg][fg]overlay=0:{int((H - h2) * 0.38)},{tail}")
+        layout = ("single", ((x0 + x1) / 2, (left[1] + right[1]) / 2 if left else 0.4))
     sw, sh, x, y = crop_offsets(src_w, src_h, W, H, layout[1] if layout[0] == "single" else None)
     return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
 
 
-def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None):
-    """Cut `seconds` of real footage at `start`, framed around the speaker(s). Muted unless `audio`.
+def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None, choice="auto"):
+    """Cut `seconds` of real footage at `start`, framed by `choice` (see plan_layout). Muted unless `audio`.
 
-    One face: crop around it. Two hosts in a vertical video: stacked, one above the other.
+    Returns the framing used: stack, side, wide, single or center.
     """
     from common import video_size
 
@@ -1813,7 +1903,11 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     src_w, src_h = video_size(src)
     if not src_w:
         raise RuntimeError(f"cannot read video size of {src}")
-    layout = layout or plan_layout(detect_faces(src, start, seconds), vertical=H > W)
+    if layout is None:
+        frames = detect_faces(src, start, seconds)
+        layout = plan_layout(frames, vertical=H > W, choice=choice if choice in FRAMINGS else "auto")
+        if choice in ("stack", "side", "single-left", "single-right") and not find_hosts(frames)[0]:
+            log("  two hosts not found in this clip - using typical seat positions")
     log(f"  framing: {layout[0]}")
     sound = ["-map", "0:a?", "-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
     run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src,
@@ -2474,7 +2568,9 @@ def stage_visuals(project, cfg, force):
             if not os.path.exists(wav):
                 fail(f"Missing voice line {wav} - run the voice stage first.")
             secs = duration(wav) + 0.05
-        if os.path.exists(out) and not force and abs(duration(out) - secs) < 0.6:
+        choice = s.get("layout") or cfg.get("framing", "auto")
+        same_framing = kind not in ("soundbite", "footage") or s.get("framing_choice") == choice
+        if os.path.exists(out) and not force and same_framing and abs(duration(out) - secs) < 0.6:
             counts[kind] += 1
             continue
         log(f"[visual {i}/{len(script['scenes'])}] {kind} ({secs:.1f}s)")
@@ -2484,7 +2580,8 @@ def stage_visuals(project, cfg, force):
                     raise RuntimeError("source footage is missing")
                 log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
                 s["framing"] = visuals.footage_clip(src["file"], src["start"], out, secs, fmt,
-                                                    audio=kind == "soundbite")
+                                                    audio=kind == "soundbite", choice=choice)
+                s["framing_choice"] = choice
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -2607,6 +2704,8 @@ def main():
     ap.add_argument("--library")
     ap.add_argument("--music")
     ap.add_argument("--device", choices=["cuda", "cpu"])
+    ap.add_argument("--framing", choices=["auto", "stack", "side", "wide", "single", "single-left", "single-right"],
+                    help="How episode footage is framed (a scene's own 'layout' overrides this)")
     ap.add_argument("--stills", choices=["on", "off"])
     ap.add_argument("--captions", choices=["on", "off"])
     ap.add_argument("--soundbites", choices=["on", "off"])
@@ -2617,11 +2716,12 @@ def main():
 
     project = ensure_dir(os.path.abspath(a.project))
     cfg = {"seconds": 45, "format": "9:16", "model": "gemma3:4b", "language": "English",
-           "device": "cuda", "stills": False, "captions": True}
+           "device": "cuda", "stills": False, "captions": True, "framing": "auto"}
     cfg.update(load(project))
     if a.prompt_file:
         cfg["prompt"] = read_text(a.prompt_file).strip()
-    for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
+    for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device",
+                "framing"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
     for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check"):
@@ -2649,7 +2749,8 @@ if __name__ == "__main__":
 $files['scenes.py'] = @'
 """Scene editor backend: change, re-make, add or delete one scene without redoing the rest.
 
-  python scenes.py set    --project P --index 3 --fields-file edit.json
+  python scenes.py set    --project P --index 3 --fields-file edit.json   (fields: narration, visual, query,
+                                                                           card_text, image_prompt, layout)
   python scenes.py remake --project P --index 3        (new voice take / next best footage / new still)
   python scenes.py add    --project P --index 3        (insert a card scene after scene 3)
   python scenes.py delete --project P --index 3
@@ -2661,6 +2762,7 @@ import os
 from common import fail, log, read_json, write_json, write_text
 
 KINDS = ("soundbite", "footage", "card", "still")
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
 PARTS = (("voice", ".wav"), ("visuals", ".mp4"), ("visuals", ".png"), ("scenes", ".mp4"))
 
 
@@ -2742,6 +2844,14 @@ def main():
         for key in ("narration", "query", "card_text", "image_prompt"):
             if key in new:
                 s[key] = " ".join(str(new[key] or "").split())
+        if "layout" in new:
+            layout = str(new["layout"] or "").lower()
+            if layout and layout not in FRAMINGS:
+                fail(f"Unknown framing '{layout}'.")
+            if layout:
+                s["layout"] = layout
+            else:
+                s.pop("layout", None)   # back to the project's framing
         visual = str(new.get("visual") or s["visual"]).lower()
         if visual not in KINDS:
             fail(f"Unknown scene type '{visual}'.")
@@ -3500,7 +3610,8 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Captions are built from the script and measured timings, not from speech recognition.
 - The outline step writes `hooks.json` (three opening lines); the `HOOK:` line in `outline.txt` is the one used.
 - New voice lines are listened back to on the CPU and re-made up to twice if garbled (`--voice-check off` to skip).
-- Footage with two faces side by side is stacked (one host above the other) in vertical videos.
+- Footage framing: `--framing auto|stack|side|wide|single|single-left|single-right` for the video, or a scene's `layout` to override it. auto = stacked when two hosts are found in a vertical video, else one person.
+- If two faces cannot be found for a two-host framing, typical seat positions (27% and 73% of the width) are assumed.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.
 '@
 foreach ($name in $files.Keys) {

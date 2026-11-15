@@ -328,7 +328,9 @@ def stage_visuals(project, cfg, force):
             if not os.path.exists(wav):
                 fail(f"Missing voice line {wav} - run the voice stage first.")
             secs = duration(wav) + 0.05
-        if os.path.exists(out) and not force and abs(duration(out) - secs) < 0.6:
+        choice = s.get("layout") or cfg.get("framing", "auto")
+        same_framing = kind not in ("soundbite", "footage") or s.get("framing_choice") == choice
+        if os.path.exists(out) and not force and same_framing and abs(duration(out) - secs) < 0.6:
             counts[kind] += 1
             continue
         log(f"[visual {i}/{len(script['scenes'])}] {kind} ({secs:.1f}s)")
@@ -338,7 +340,8 @@ def stage_visuals(project, cfg, force):
                     raise RuntimeError("source footage is missing")
                 log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
                 s["framing"] = visuals.footage_clip(src["file"], src["start"], out, secs, fmt,
-                                                    audio=kind == "soundbite")
+                                                    audio=kind == "soundbite", choice=choice)
+                s["framing_choice"] = choice
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -461,6 +464,8 @@ def main():
     ap.add_argument("--library")
     ap.add_argument("--music")
     ap.add_argument("--device", choices=["cuda", "cpu"])
+    ap.add_argument("--framing", choices=["auto", "stack", "side", "wide", "single", "single-left", "single-right"],
+                    help="How episode footage is framed (a scene's own 'layout' overrides this)")
     ap.add_argument("--stills", choices=["on", "off"])
     ap.add_argument("--captions", choices=["on", "off"])
     ap.add_argument("--soundbites", choices=["on", "off"])
@@ -471,11 +476,12 @@ def main():
 
     project = ensure_dir(os.path.abspath(a.project))
     cfg = {"seconds": 45, "format": "9:16", "model": "gemma3:4b", "language": "English",
-           "device": "cuda", "stills": False, "captions": True}
+           "device": "cuda", "stills": False, "captions": True, "framing": "auto"}
     cfg.update(load(project))
     if a.prompt_file:
         cfg["prompt"] = read_text(a.prompt_file).strip()
-    for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
+    for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device",
+                "framing"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
     for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check"):

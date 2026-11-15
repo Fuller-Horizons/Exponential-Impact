@@ -1,6 +1,7 @@
 """Scene editor backend: change, re-make, add or delete one scene without redoing the rest.
 
-  python scenes.py set    --project P --index 3 --fields-file edit.json
+  python scenes.py set    --project P --index 3 --fields-file edit.json   (fields: narration, visual, query,
+                                                                           card_text, image_prompt, layout)
   python scenes.py remake --project P --index 3        (new voice take / next best footage / new still)
   python scenes.py add    --project P --index 3        (insert a card scene after scene 3)
   python scenes.py delete --project P --index 3
@@ -12,6 +13,7 @@ import os
 from common import fail, log, read_json, write_json, write_text
 
 KINDS = ("soundbite", "footage", "card", "still")
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
 PARTS = (("voice", ".wav"), ("visuals", ".mp4"), ("visuals", ".png"), ("scenes", ".mp4"))
 
 
@@ -93,6 +95,14 @@ def main():
         for key in ("narration", "query", "card_text", "image_prompt"):
             if key in new:
                 s[key] = " ".join(str(new[key] or "").split())
+        if "layout" in new:
+            layout = str(new["layout"] or "").lower()
+            if layout and layout not in FRAMINGS:
+                fail(f"Unknown framing '{layout}'.")
+            if layout:
+                s["layout"] = layout
+            else:
+                s.pop("layout", None)   # back to the project's framing
         visual = str(new.get("visual") or s["visual"]).lower()
         if visual not in KINDS:
             fail(f"Unknown scene type '{visual}'.")

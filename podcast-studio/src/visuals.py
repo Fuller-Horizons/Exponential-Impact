@@ -118,12 +118,14 @@ def _median(values):
     return values[len(values) // 2]
 
 
-def plan_layout(frames, vertical=True):
-    """Decide how to frame footage from detected faces.
+FRAMINGS = ("auto", "stack", "side", "wide", "single", "single-left", "single-right")
+ASSUMED_HOSTS = ((0.27, 0.40), (0.73, 0.40))  # where two hosts usually sit when their faces cannot be found
 
-    ("stack", left, right)  two hosts side by side -> one above the other (vertical video only)
-    ("single", centre)      one speaker -> crop around them
-    ("center",)             no faces found -> plain centre crop
+
+def find_hosts(frames):
+    """(left, right, biggest): median face positions of two hosts side by side, and of the largest face.
+
+    left/right are None unless two well-separated, similar-sized faces show up in most frames.
     """
     with_faces = [f for f in frames if f]
     pairs = []
@@ -133,14 +135,45 @@ def plan_layout(frames, vertical=True):
         a, b = sorted(f, key=lambda face: -face[2])[:2]
         if abs(a[0] - b[0]) >= 0.25 and b[2] >= 0.5 * a[2]:
             pairs.append(sorted((a, b)))
-    if vertical and len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
+    left = right = biggest = None
+    if len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
         left = (_median([p[0][0] for p in pairs]), _median([p[0][1] for p in pairs]))
         right = (_median([p[1][0] for p in pairs]), _median([p[1][1] for p in pairs]))
-        return ("stack", left, right)
     if len(with_faces) >= 2:
-        biggest = [max(f, key=lambda face: face[2]) for f in with_faces]
-        return ("single", (_median([b[0] for b in biggest]), _median([b[1] for b in biggest])))
-    return ("center",)
+        big = [max(f, key=lambda face: face[2]) for f in with_faces]
+        biggest = (_median([b[0] for b in big]), _median([b[1] for b in big]))
+    return left, right, biggest
+
+
+def plan_layout(frames, vertical=True, choice="auto"):
+    """Decide how to frame footage.
+
+    choice        result
+    auto          stack when two hosts are found in a vertical video, else single, else centre
+    stack         ("stack", left, right)   one host above the other
+    side          ("side", left, right)    split screen, hosts next to each other
+    wide          ("wide", left, right)    both hosts in one frame (left/right may be None)
+    single        ("single", centre)       the larger face; ("center",) when no face is found
+    single-left   ("single", left)         the host on the left
+    single-right  ("single", right)        the host on the right
+    When a two-host choice is asked for and two faces cannot be found, typical seat positions are assumed.
+    """
+    left, right, biggest = find_hosts(frames)
+    if choice == "auto":
+        if vertical and left:
+            return ("stack", left, right)
+        return ("single", biggest) if biggest else ("center",)
+    if choice == "single":
+        return ("single", biggest) if biggest else ("center",)
+    if choice == "wide":
+        return ("wide", left, right)
+    if not left:
+        left, right = ASSUMED_HOSTS
+    if choice == "single-left":
+        return ("single", left)
+    if choice == "single-right":
+        return ("single", right)
+    return (choice, left, right)
 
 
 def crop_offsets(src_w, src_h, W, H, center=None, zoom=1.0):
@@ -155,26 +188,60 @@ def crop_offsets(src_w, src_h, W, H, center=None, zoom=1.0):
     return sw, sh, x, y
 
 
+def _even(n):
+    return max(2, int(n) // 2 * 2)
+
+
+def _pane(src_w, src_h, pw, ph, face, show, source, name):
+    """One host's box: zoomed so it shows about `show` of the original frame's width."""
+    zoom = max(1.0, (pw / (show * src_w)) / max(pw / src_w, ph / src_h))
+    sw, sh, x, y = crop_offsets(src_w, src_h, pw, ph, face, zoom)
+    return f"[{source}]scale={sw}:{sh},crop={pw}:{ph}:{x}:{y}[{name}]"
+
+
+def _backdrop(src_w, src_h, W, H, source):
+    """A blurred, darkened full-frame copy to sit behind a picture that does not fill the frame."""
+    sw, sh, x, y = crop_offsets(src_w, src_h, W, H)
+    return f"[{source}]scale={sw}:{sh},crop={W}:{H}:{x}:{y},boxblur=24:2,eq=brightness=-0.12[bg]"
+
+
 def footage_filter(src_w, src_h, W, H, layout):
     """ffmpeg filter graph ([0:v] -> [v]) for a layout from plan_layout."""
     tail = "fps=30,format=yuv420p,setsar=1[v]"
-    if layout[0] == "stack":
+    kind = layout[0]
+    if kind == "stack":
         half = H // 2
-        # zoom so each host's box shows roughly half the width of the original frame
-        zoom = max(1.0, (W / (0.55 * src_w)) / max(W / src_w, half / src_h))
-        parts = []
-        for name, face in (("top", layout[1]), ("bottom", layout[2])):
-            sw, sh, x, y = crop_offsets(src_w, src_h, W, half, face, zoom)
-            parts.append(f"[{name}0]scale={sw}:{sh},crop={W}:{half}:{x}:{y}[{name}]")
-        return "[0:v]split=2[top0][bottom0];" + ";".join(parts) + f";[top][bottom]vstack,{tail}"
+        return ("[0:v]split=2[top0][bottom0];"
+                + _pane(src_w, src_h, W, half, layout[1], 0.55, "top0", "top") + ";"
+                + _pane(src_w, src_h, W, half, layout[2], 0.55, "bottom0", "bottom")
+                + f";[top][bottom]vstack,{tail}")
+    if kind == "side":
+        pw = W // 2
+        ph = _even(H * 0.6) if H > W else H        # in a tall video the pair sits in a band, not two thin strips
+        panes = (_pane(src_w, src_h, pw, ph, layout[1], 0.45, "l0", "l") + ";"
+                 + _pane(src_w, src_h, pw, ph, layout[2], 0.45, "r0", "r"))
+        if ph == H:
+            return f"[0:v]split=2[l0][r0];{panes};[l][r]hstack,{tail}"
+        return (f"[0:v]split=3[bg0][l0][r0];{_backdrop(src_w, src_h, W, H, 'bg0')};{panes};[l][r]hstack[fg];"
+                f"[bg][fg]overlay=0:{int((H - ph) * 0.38)},{tail}")
+    if kind == "wide":
+        left, right = (layout[1], layout[2]) if len(layout) > 2 else (None, None)
+        x0, x1 = (max(0.0, left[0] - 0.24), min(1.0, right[0] + 0.24)) if left else (0.0, 1.0)
+        cw, cx = _even((x1 - x0) * src_w), int(x0 * src_w)
+        h2 = _even(W * src_h / cw)
+        if h2 < H:  # the two-shot is wider than the frame: show all of it over a blurred backdrop
+            return (f"[0:v]split=2[bg0][fg0];{_backdrop(src_w, src_h, W, H, 'bg0')};"
+                    f"[fg0]crop={cw}:{src_h}:{cx}:0,scale={W}:{h2}[fg];"
+                    f"[bg][fg]overlay=0:{int((H - h2) * 0.38)},{tail}")
+        layout = ("single", ((x0 + x1) / 2, (left[1] + right[1]) / 2 if left else 0.4))
     sw, sh, x, y = crop_offsets(src_w, src_h, W, H, layout[1] if layout[0] == "single" else None)
     return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
 
 
-def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None):
-    """Cut `seconds` of real footage at `start`, framed around the speaker(s). Muted unless `audio`.
+def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None, choice="auto"):
+    """Cut `seconds` of real footage at `start`, framed by `choice` (see plan_layout). Muted unless `audio`.
 
-    One face: crop around it. Two hosts in a vertical video: stacked, one above the other.
+    Returns the framing used: stack, side, wide, single or center.
     """
     from common import video_size
 
@@ -184,7 +251,11 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     src_w, src_h = video_size(src)
     if not src_w:
         raise RuntimeError(f"cannot read video size of {src}")
-    layout = layout or plan_layout(detect_faces(src, start, seconds), vertical=H > W)
+    if layout is None:
+        frames = detect_faces(src, start, seconds)
+        layout = plan_layout(frames, vertical=H > W, choice=choice if choice in FRAMINGS else "auto")
+        if choice in ("stack", "side", "single-left", "single-right") and not find_hosts(frames)[0]:
+            log("  two hosts not found in this clip - using typical seat positions")
     log(f"  framing: {layout[0]}")
     sound = ["-map", "0:a?", "-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
     run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src,

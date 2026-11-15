@@ -25,6 +25,10 @@ invisibly, builds every tab and dialog, exercises the main buttons' logic and a 
    AI still. Captions highlight word by word; audio is normalised and music is lowered under speech.
 4. If a stage fails, press step 2 again: finished work is kept. Editing the outline rebuilds everything after it.
 
+**Framing** sets how episode footage is shown: Auto, Stacked (one host above the other), Side by side (split
+screen), Both in frame (the whole two-shot), One person (the larger face), Left person or Right person. The
+Scenes tab can override it for a single scene.
+
 The outline step offers three hooks to pick from. **Brand kit...** sets the show's colours, font and logo once
 (`workspace\brand.json`). Garbled voice lines are detected and re-made automatically, up to twice.
 

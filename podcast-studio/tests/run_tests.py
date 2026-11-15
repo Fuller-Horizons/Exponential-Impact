@@ -129,6 +129,32 @@ def layout_planning():
 
 
 @test
+def framing_choices():
+    import visuals
+    two = [(0.30, 0.40, 0.12), (0.70, 0.42, 0.11)]
+    seen, none = [two, two, two], []
+    assert visuals.plan_layout(seen, True, "stack")[:2] == ("stack", (0.30, 0.40))
+    assert visuals.plan_layout(seen, False, "stack")[0] == "stack", "an explicit choice applies in any shape"
+    assert visuals.plan_layout(seen, True, "side") == ("side", (0.30, 0.40), (0.70, 0.42))
+    assert visuals.plan_layout(seen, True, "wide") == ("wide", (0.30, 0.40), (0.70, 0.42))
+    assert visuals.plan_layout(seen, True, "single-left") == ("single", (0.30, 0.40))
+    assert visuals.plan_layout(seen, True, "single-right") == ("single", (0.70, 0.42))
+    assert visuals.plan_layout(seen, True, "single")[0] == "single"
+    # no faces found: two-host choices fall back to typical seats, single falls back to the centre
+    assert visuals.plan_layout(none, True, "side") == ("side",) + visuals.ASSUMED_HOSTS
+    assert visuals.plan_layout(none, True, "single-right") == ("single", visuals.ASSUMED_HOSTS[1])
+    assert visuals.plan_layout(none, True, "wide") == ("wide", None, None)
+    assert visuals.plan_layout(none, True, "single") == ("center",) and visuals.plan_layout(none) == ("center",)
+    tall = visuals.footage_filter(1920, 1080, 1080, 1920, ("side",) + visuals.ASSUMED_HOSTS)
+    assert "hstack" in tall and "boxblur" in tall and tall.count("crop=540:1152") == 2
+    flat = visuals.footage_filter(1920, 1080, 1920, 1080, ("side",) + visuals.ASSUMED_HOSTS)
+    assert "hstack" in flat and "boxblur" not in flat and flat.count("crop=960:1080") == 2
+    wide = visuals.footage_filter(1920, 1080, 1080, 1920, ("wide", None, None))
+    assert "boxblur" in wide and "scale=1080:606" in wide
+    assert "boxblur" not in visuals.footage_filter(1920, 1080, 1920, 1080, ("wide", None, None))
+
+
+@test
 def brand_kit():
     import brand
     import subs
@@ -200,6 +226,21 @@ def stacked_two_host_footage():
 
 
 @test
+def every_framing_renders():
+    import visuals
+    src = os.path.join(WORK, "eps", "ep1.mp4")
+    expect = {"stack": "stack", "side": "side", "wide": "wide", "single": "center", "single-left": "single",
+              "single-right": "single", "auto": "center"}
+    for fmt, size in (("9:16", "1080,1920"), ("16:9", "1920,1080"), ("1:1", "1080,1080")):
+        for choice, kind in expect.items():
+            out = os.path.join(WORK, "framing.mp4")
+            got = visuals.footage_clip(src, 2, out, 0.5, fmt, choice=choice)
+            dims = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                      "-of", "csv=p=0", out).strip()
+            assert got == kind and dims == size, (fmt, choice, got, dims)
+
+
+@test
 def e2e_prompt_to_video():
     import fake_ollama
     voice = os.path.join(WORK, "ref.wav")
@@ -208,7 +249,7 @@ def e2e_prompt_to_video():
     sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=200x100", "-frames:v", "1", logo)
     json.dump({"accent": "#00C2FF", "logo": logo}, open(os.path.join(WORK, "ws", "brand.json"), "w"))
     out = pipeline_run("--stage", "outline", "--prompt", "cash flow tips", "--seconds", "32", "--voice", voice,
-                       "--library", LIB)
+                       "--library", LIB, "--framing", "side")
     outline = open(os.path.join(PROJECT, "outline.txt"), encoding="utf-8").read()
     hooks = json.load(open(os.path.join(PROJECT, "hooks.json"), encoding="utf-8"))
     assert "TITLE: Cash Flow Wins" in outline and len(hooks) == 3 and f"HOOK: {hooks[0]}" in outline
@@ -223,6 +264,8 @@ def e2e_prompt_to_video():
     script = json.load(open(os.path.join(PROJECT, "script.json"), encoding="utf-8"))
     kinds = [s["visual"] for s in script["scenes"]]
     assert kinds.count("soundbite") == 1 and "footage" in kinds and "card" in kinds, kinds
+    framed = [s for s in script["scenes"] if s["visual"] in ("footage", "soundbite")]
+    assert framed and all(s["framing"] == "side" and s["framing_choice"] == "side" for s in framed), framed
     bite = next(s for s in script["scenes"] if s["visual"] == "soundbite")
     assert bite["narration"] == "" and bite["source"]["segs"]
     size = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of",
@@ -269,6 +312,9 @@ def e2e_scene_editor():
     before = scenes[foot - 1]["source"]["start"]
     scenes_run("remake", foot)
     assert load()[foot - 1]["source"]["start"] != before
+    # 3b. per-scene framing overrides the video's framing
+    scenes_run("set", foot, {"layout": "single-left"})
+    assert "Unknown framing" in scenes_run("set", foot, {"layout": "sideways"}, ok=1)
     # 4. validation
     assert "needs narration" in scenes_run("set", card, {"narration": ""}, ok=1)
     assert "does not exist" in scenes_run("remake", 99, ok=1)
@@ -284,6 +330,14 @@ def e2e_scene_editor():
     spoken = out.count("[voice ")
     assert spoken == 2, f"only the edited line and the re-made scene should be spoken again, got {spoken}"
     assert load()[card - 1]["card_text"] == "Edited card" and os.path.exists(os.path.join(PROJECT, "final.mp4"))
+    edited = load()[foot - 1]
+    assert edited["layout"] == "single-left" and edited["framing_choice"] == "single-left" and edited["framing"] == "single"
+    others = [s for n, s in enumerate(load(), 1) if n != foot and s["visual"] in ("footage", "soundbite")]
+    assert all(s["framing_choice"] == "side" for s in others), "other scenes keep the video's framing"
+    # 7. changing the video's framing re-frames footage without re-recording any voice
+    out = pipeline_run("--stage", "all", "--framing", "wide")
+    assert out.count("[voice ") == 0 and all(s["framing"] == "wide" for s in
+                                             [x for n, x in enumerate(load(), 1) if n != foot and x.get("source")])
     qa = json.load(open(os.path.join(PROJECT, "qa.json"), encoding="utf-8"))
     assert qa["verdict"] != "FAIL", qa
 

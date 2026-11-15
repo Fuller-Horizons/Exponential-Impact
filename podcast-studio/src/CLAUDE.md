@@ -31,5 +31,6 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Captions are built from the script and measured timings, not from speech recognition.
 - The outline step writes `hooks.json` (three opening lines); the `HOOK:` line in `outline.txt` is the one used.
 - New voice lines are listened back to on the CPU and re-made up to twice if garbled (`--voice-check off` to skip).
-- Footage with two faces side by side is stacked (one host above the other) in vertical videos.
+- Footage framing: `--framing auto|stack|side|wide|single|single-left|single-right` for the video, or a scene's `layout` to override it. auto = stacked when two hosts are found in a vertical video, else one person.
+- If two faces cannot be found for a two-host framing, typical seat positions (27% and 73% of the width) are assumed.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.

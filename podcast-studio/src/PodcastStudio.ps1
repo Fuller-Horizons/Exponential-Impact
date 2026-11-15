@@ -45,6 +45,15 @@ function Pick-File([string]$filter = 'All files|*.*', [string]$dir = $Work) {
     if ($d.ShowDialog() -eq 'OK') { return $d.FileName }
     return $null
 }
+# How episode footage is framed: label shown in the app -> value the pipeline understands
+$Framings = [ordered]@{
+    'Auto' = 'auto'; 'Stacked' = 'stack'; 'Side by side' = 'side'; 'Both in frame' = 'wide'
+    'One person' = 'single'; 'Left person' = 'single-left'; 'Right person' = 'single-right'
+}
+function Get-FramingLabel([string]$value) {
+    foreach ($k in $Framings.Keys) { if ($Framings[$k] -eq $value) { return $k } }
+    return ''
+}
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
 $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
@@ -218,7 +227,8 @@ function Get-ProjectArgs([string]$dir, [string]$stage) {
     $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
         '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
         '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }),
-        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }))
+        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }),
+        '--framing', $Framings[[string]$cFrame.SelectedItem])
     if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
     return $argv
 }
@@ -265,8 +275,10 @@ $b.Add_Click({
 Add-Label $t0 'Hook (pick one)' 10 218 | Out-Null
 $cHook = New-Object System.Windows.Forms.ComboBox
 $cHook.DropDownStyle = 'DropDownList'
-$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(520, 24)
+$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(325, 24)
 $t0.Controls.Add($cHook)
+Add-Label $t0 'Framing' 485 218 55 | Out-Null
+$cFrame = Add-Combo $t0 543 218 132 @($Framings.Keys)
 $cHook.Add_SelectedIndexChanged({
     if ($cHook.SelectedIndex -lt 0) { return }
     $lines = $cOutline.Text -split "`r?`n"
@@ -371,6 +383,8 @@ $eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font
 $tS.Controls.Add($eList)
 Add-Label $tS 'Type' 365 45 90 | Out-Null
 $eType = Add-Combo $tS 460 45 150 @('card', 'footage', 'soundbite', 'still')
+Add-Label $tS 'Framing' 625 45 60 | Out-Null
+$eLayout = Add-Combo $tS 690 45 220 (@('(video default)') + @($Framings.Keys))
 Add-Label $tS 'Narration' 365 80 90 | Out-Null
 $eNarr = Add-Text $tS 460 80 450 '' 95
 Add-Label $tS 'Search words' 365 183 90 | Out-Null
@@ -409,6 +423,8 @@ $eList.Add_SelectedIndexChanged({
     if ($i -lt 0 -or $i -ge $script:sceneData.Count) { return }
     $sc = $script:sceneData[$i]
     if ($eType.Items.Contains([string]$sc.visual)) { $eType.SelectedItem = [string]$sc.visual }
+    $label = Get-FramingLabel ([string]$sc.layout)
+    if ($label) { $eLayout.SelectedItem = $label } else { $eLayout.SelectedIndex = 0 }
     $eNarr.Text = [string]$sc.narration; $eQuery.Text = [string]$sc.query
     $eCard.Text = [string]$sc.card_text; $eImg.Text = [string]$sc.image_prompt
 })
@@ -418,7 +434,8 @@ $b.Add_Click({
     $n = Get-SceneNumber; if ($n -eq 0) { return }
     $dir = Get-Project; if (-not $dir) { return }
     $fields = [ordered]@{ narration = $eNarr.Text; visual = [string]$eType.SelectedItem; query = $eQuery.Text
-                          card_text = $eCard.Text; image_prompt = $eImg.Text }
+                          card_text = $eCard.Text; image_prompt = $eImg.Text
+                          layout = $(if ($eLayout.SelectedIndex -gt 0) { $Framings[[string]$eLayout.SelectedItem] } else { '' }) }
     $edit = Join-Path $dir 'edit.json'
     [System.IO.File]::WriteAllText($edit, ($fields | ConvertTo-Json))
     Run-Py "Save scene $n" 'scenes.py' @('set', '--project', $dir, '--index', "$n", '--fields-file', $edit) { Load-Scenes $true }
@@ -467,9 +484,8 @@ $b.Add_Click({
     $q = Join-Path $dir 'qa.json'
     if (Test-Path $q) { Start-Process notepad.exe $q } else { Msg 'No quality report yet.' }
 })
-$nS = Add-Label $tS ('Save scene stores your edit; nothing is rebuilt until you press "Apply changes". Only edited scenes are re-made: changing ' +
-    'card text keeps the voice line, changing narration re-records it. "Re-make this scene" gives a new voice take and, for footage or ' +
-    'soundbites, the next best matching moment.') 365 378 545
+$nS = Add-Label $tS ('Save scene stores your edit; press "Apply changes" to rebuild. Only edited scenes are re-made. ' +
+    '"Re-make this scene" gives a new voice take and the next best footage. Framing applies to footage and soundbites.') 365 378 545
 $nS.Size = New-Object System.Drawing.Size(545, 62)
 
 # ================================================================ TAB 1: Analyze
@@ -788,23 +804,30 @@ Check 'project arguments' {
     $dir = Get-Project
     Expect ($dir -eq $smokeDir) "unexpected project folder: $dir"
     $argv = @(Get-ProjectArgs $dir 'outline')
-    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites') {
+    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites', '--framing') {
         Expect ($argv -contains $need) "missing argument $need"
     }
+    $cFrame.SelectedItem = 'Side by side'
+    $argv = @(Get-ProjectArgs $dir 'outline')
+    Expect ($argv[[array]::IndexOf($argv, '--framing') + 1] -eq 'side') 'framing choice was not passed on'
+    $cFrame.SelectedIndex = 0
     Expect (Test-Path (Join-Path $dir 'prompt.txt')) 'prompt.txt was not written'
     $cPrompt.Text = ''
     "$($argv.Count) arguments"
 }
 Check 'scenes tab loads and selects' {
     $json = '{"title":"Smoke","scenes":[{"narration":"First line.","visual":"card","query":"q1","card_text":"Card one","image_prompt":""},' +
-            '{"narration":"","visual":"soundbite","query":"cash flow","card_text":"","image_prompt":""}]}'
+            '{"narration":"","visual":"soundbite","query":"cash flow","card_text":"","image_prompt":"","layout":"single-left"}]}'
     [System.IO.File]::WriteAllText((Join-Path $smokeDir 'script.json'), $json)
     Load-Scenes $true
     Expect ($eList.Items.Count -eq 2) "expected 2 scenes, list shows $($eList.Items.Count)"
     $eList.SelectedIndex = 0
     Expect ($eNarr.Text -eq 'First line.' -and $eCard.Text -eq 'Card one' -and [string]$eType.SelectedItem -eq 'card') 'scene 1 fields not filled in'
+    Expect ($eLayout.SelectedIndex -eq 0) 'scene 1 should show the video default framing'
     $eList.SelectedIndex = 1
     Expect ([string]$eType.SelectedItem -eq 'soundbite' -and $eQuery.Text -eq 'cash flow') 'scene 2 fields not filled in'
+    Expect ([string]$eLayout.SelectedItem -eq 'Left person') "scene 2 framing shows '$($eLayout.SelectedItem)'"
+    Expect ((Get-FramingLabel 'wide') -eq 'Both in frame' -and (Get-FramingLabel 'nope') -eq '') 'framing labels are wrong'
     Expect ((Get-SceneNumber) -eq 2) 'scene number is wrong'
     [string]$eList.Items[1]
 }
