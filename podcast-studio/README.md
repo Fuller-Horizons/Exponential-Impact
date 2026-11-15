@@ -12,7 +12,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\
 
 Options: `-Root D:\PodcastStudio`, `-Model gemma3:4b`, `-WithStills`, `-SkipModels`, `-SkipClaude`, `-CpuOnly`, `-Upgrade`,
 and `-CheckOnly` to inspect the PC and network without installing. Every run saves `logs\install-<time>.log`.
-The installer ends with a self-test and writes `logs\selftest.json`.
+The installer ends with a self-test and writes `logs\selftest.json`. The self-test also opens the app
+invisibly, builds every tab and dialog, exercises the main buttons' logic and a background job, and writes
+`logs\gui-smoke.json` (`Test-PodcastStudio.ps1 -NoGui` skips this).
 
 ## Create tab: prompt to video
 1. **Index footage** once: point it at the folder of episode videos.

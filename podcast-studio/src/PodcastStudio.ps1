@@ -1,5 +1,10 @@
 # Podcast Studio - local GUI: prompt -> outline -> script -> voice -> visuals -> video (all on this PC)
 # Windows PowerShell 5.1+.  Launch:  powershell -ExecutionPolicy Bypass -File PodcastStudio.ps1
+#   -SmokeTest  builds every screen invisibly, exercises the main handlers, writes logs\gui-smoke.json and exits
+#               (exit code = number of failed checks). Run by Test-PodcastStudio.ps1.
+param([switch]$SmokeTest)
+$script:Smoke = [bool]$SmokeTest
+$Error.Clear()
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -28,7 +33,12 @@ function Q([string]$s) {
     }
     return $s
 }
-function Msg([string]$t) { [void][System.Windows.Forms.MessageBox]::Show($t, 'Podcast Studio') }
+$script:lastMsg = ''
+function Msg([string]$t) {
+    $script:lastMsg = $t
+    if ($script:Smoke) { return }   # never block the smoke test on a message box
+    [void][System.Windows.Forms.MessageBox]::Show($t, 'Podcast Studio')
+}
 function Pick-File([string]$filter = 'All files|*.*', [string]$dir = $Work) {
     $d = New-Object System.Windows.Forms.OpenFileDialog
     $d.Filter = $filter; $d.InitialDirectory = $dir
@@ -139,7 +149,7 @@ function Start-Job2([string]$label, [string]$exe, [string[]]$argv, [scriptblock]
     if (-not (Test-Path $Py)) { Msg "Python venv not found at $Py. Re-run Setup-PodcastStudio.ps1."; return }
     $script:outFile = Join-Path $LogDir 'job.out.log'
     $script:errFile = Join-Path $LogDir 'job.err.log'
-    Remove-Item $script:outFile, $script:errFile -ErrorAction SilentlyContinue
+    Remove-Item $script:outFile, $script:errFile -ErrorAction Ignore
     $script:pos = @{}
     $script:onDone = $onDone
     $argString = ($argv | ForEach-Object { Q $_ }) -join ' '
@@ -280,8 +290,8 @@ $n0 = Add-Label $t0 'Runs fully on this PC: a local model writes the outline and
 $n0.Size = New-Object System.Drawing.Size(760, 34)
 
 # ---------------------------------------------------------------- brand kit dialog (workspace\brand.json)
-function Show-BrandKit {
-    $path = Join-Path $Work 'brand.json'
+function Show-BrandKit([string]$path = '') {
+    if (-not $path) { $path = Join-Path $Work 'brand.json' }
     $kit = @{ accent = '#FFC400'; background = '#20223E'; text = '#FFFFFF'; caption_highlight = '#FFD700'
               caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right' }
     if (Test-Path $path) {
@@ -334,6 +344,7 @@ function Show-BrandKit {
     if ($pos.Items.Contains([string]$kit.logo_position)) { $pos.SelectedItem = [string]$kit.logo_position }
     $ok = Add-Button $f 'Save' 300 310 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
     $cancel = Add-Button $f 'Cancel' 400 310 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::OK }) }
     if ($f.ShowDialog($form) -ne 'OK') { return }
     $out = [ordered]@{}
     foreach ($k in 'accent', 'background', 'text', 'caption_highlight') {
@@ -706,4 +717,141 @@ $form.Add_Shown({
     if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
-[void]$form.ShowDialog()
+if (-not $script:Smoke) {
+    [void]$form.ShowDialog()
+    return
+}
+
+# ================================================================ smoke test (only with -SmokeTest)
+$buildErrors = @($Error | ForEach-Object { '{0} (line {1})' -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber })
+$Error.Clear()
+$script:smokeResults = @()
+function Check([string]$name, [scriptblock]$body) {
+    $detail = ''
+    $before = $Error.Count
+    try {
+        $detail = [string](& $body)
+        if ($Error.Count -gt $before) { throw ('error raised: ' + $Error[0].Exception.Message) }
+        $status = 'pass'
+    } catch {
+        $status = 'FAIL'
+        $detail = '{0} (line {1})' -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber
+    }
+    $script:smokeResults += [ordered]@{ check = $name; status = $status; detail = $detail }
+    Write-Host ('  [{0}] {1}: {2}' -f $status, $name, $detail)
+}
+function Pump([int]$ms) {
+    $until = (Get-Date).AddMilliseconds($ms)
+    while ((Get-Date) -lt $until) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 20 }
+}
+function Expect([bool]$condition, [string]$message) { if (-not $condition) { throw $message } }
+
+Write-Host 'App screens (invisible smoke test)'
+$form.Opacity = 0; $form.ShowInTaskbar = $false
+$form.Show(); Pump 300
+
+Check 'screens build without errors' {
+    Expect ($buildErrors.Count -eq 0) ("{0} error(s) while building: {1}" -f $buildErrors.Count, ($buildErrors -join ' | '))
+    'no errors'
+}
+Check 'all tabs open' {
+    Expect ($tabs.TabPages.Count -eq 6) "expected 6 tabs, found $($tabs.TabPages.Count)"
+    $names = @()
+    for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
+        $tabs.SelectedIndex = $i; Pump 60
+        $page = $tabs.TabPages[$i]
+        Expect ($page.Controls.Count -ge 5) "tab '$($page.Text)' has only $($page.Controls.Count) controls"
+        $names += $page.Text
+    }
+    $tabs.SelectedIndex = 0
+    $names -join ', '
+}
+Check 'startup checks logged' {
+    Expect ($log.Text -match 'Podcast Studio') 'the log box is empty after the window opened'
+    "$(@($log.Lines).Count) log lines"
+}
+$savedName = $cName.Text
+$cName.Text = '_smoketest'
+$smokeDir = Join-Path $Work 'projects\_smoketest'
+Check 'hook dropdown rewrites the outline' {
+    $cOutline.Text = "TITLE: T`r`nHOOK: first`r`nBEATS:`r`n1. a`r`nCTA: c"
+    $cHook.Items.Clear()
+    foreach ($h in 'first', 'second hook', 'third') { [void]$cHook.Items.Add($h) }
+    $cHook.SelectedIndex = 1
+    Expect ($cOutline.Text -match 'HOOK: second hook') 'HOOK line was not replaced'
+    Expect ($cOutline.Text -match 'TITLE: T' -and $cOutline.Text -match 'CTA: c') 'other outline lines were damaged'
+    $cOutline.Text = ''; $cHook.Items.Clear()
+    'HOOK line replaced'
+}
+Check 'project arguments' {
+    $cPrompt.Text = 'smoke test prompt'
+    $dir = Get-Project
+    Expect ($dir -eq $smokeDir) "unexpected project folder: $dir"
+    $argv = @(Get-ProjectArgs $dir 'outline')
+    foreach ($need in '--project', '--stage', 'outline', '--prompt-file', '--seconds', '--format', '--model', '--stills', '--soundbites') {
+        Expect ($argv -contains $need) "missing argument $need"
+    }
+    Expect (Test-Path (Join-Path $dir 'prompt.txt')) 'prompt.txt was not written'
+    $cPrompt.Text = ''
+    "$($argv.Count) arguments"
+}
+Check 'scenes tab loads and selects' {
+    $json = '{"title":"Smoke","scenes":[{"narration":"First line.","visual":"card","query":"q1","card_text":"Card one","image_prompt":""},' +
+            '{"narration":"","visual":"soundbite","query":"cash flow","card_text":"","image_prompt":""}]}'
+    [System.IO.File]::WriteAllText((Join-Path $smokeDir 'script.json'), $json)
+    Load-Scenes $true
+    Expect ($eList.Items.Count -eq 2) "expected 2 scenes, list shows $($eList.Items.Count)"
+    $eList.SelectedIndex = 0
+    Expect ($eNarr.Text -eq 'First line.' -and $eCard.Text -eq 'Card one' -and [string]$eType.SelectedItem -eq 'card') 'scene 1 fields not filled in'
+    $eList.SelectedIndex = 1
+    Expect ([string]$eType.SelectedItem -eq 'soundbite' -and $eQuery.Text -eq 'cash flow') 'scene 2 fields not filled in'
+    Expect ((Get-SceneNumber) -eq 2) 'scene number is wrong'
+    [string]$eList.Items[1]
+}
+Check 'brand kit dialog opens and saves' {
+    $tmp = Join-Path $smokeDir 'brand-smoke.json'
+    Show-BrandKit $tmp
+    Expect (Test-Path $tmp) 'brand file was not written'
+    $kit = [System.IO.File]::ReadAllText($tmp) | ConvertFrom-Json
+    foreach ($k in 'accent', 'background', 'text', 'caption_highlight', 'font', 'logo_position') {
+        Expect ([bool]$kit.$k) "brand file is missing $k"
+    }
+    Expect ($kit.accent -match '^#[0-9A-F]{6}$') "accent is not a colour: $($kit.accent)"
+    "accent $($kit.accent), font $($kit.font)"
+}
+Check 'argument quoting' {
+    Expect ((Q 'plain') -eq 'plain') 'plain value changed'
+    Expect ((Q 'two words') -eq '"two words"') 'spaces not quoted'
+    Expect ((Q 'C:\dir with space\') -eq '"C:\dir with space\\"') 'trailing backslash not doubled'
+    Expect ((Q 'say "hi"') -eq '"say \"hi\""') 'inner quotes not escaped'
+    'ok'
+}
+Check 'background job runs and reports' {
+    Expect (Test-Path $Py) "Python environment missing at $Py"
+    $script:smokeDone = $false
+    Start-Job2 'smoke job' 'cmd.exe' @('/c', 'echo', 'smoke-job-ok') { $script:smokeDone = $true }
+    $until = (Get-Date).AddSeconds(20)
+    while (-not $script:smokeDone -and (Get-Date) -lt $until) { Pump 100 }
+    Expect $script:smokeDone 'the job never reported completion'
+    Expect ($log.Text -match 'smoke-job-ok') 'job output did not reach the log box'
+    Expect ($status.Text -eq 'Done.') "status line shows '$($status.Text)'"
+    'ran, output captured, completion handler fired'
+}
+Check 'failed job is reported' {
+    $script:smokeDone = $false
+    Start-Job2 'smoke failing job' 'cmd.exe' @('/c', 'exit', '3') { $script:smokeDone = $true }
+    $until = (Get-Date).AddSeconds(20)
+    while ($script:proc -and (Get-Date) -lt $until) { Pump 100 }
+    Expect (-not $script:smokeDone) 'completion handler ran for a failed job'
+    Expect ($status.Text -match 'Failed') "status line shows '$($status.Text)'"
+    $status.Text
+}
+$cName.Text = $savedName
+Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
+
+$failed = @($script:smokeResults | Where-Object { $_.status -eq 'FAIL' })
+$report = [ordered]@{ when = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); passed = ($failed.Count -eq 0); results = $script:smokeResults }
+[System.IO.File]::WriteAllText((Join-Path $LogDir 'gui-smoke.json'), ($report | ConvertTo-Json -Depth 5))
+Write-Host ("App smoke test: {0} of {1} checks passed" -f ($script:smokeResults.Count - $failed.Count), $script:smokeResults.Count)
+$form.Close(); $form.Dispose()
+exit $failed.Count

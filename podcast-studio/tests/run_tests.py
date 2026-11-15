@@ -336,6 +336,34 @@ def powershell_static_syntax():
     sh(PY, os.path.join(HERE, "check_ps.py"), *files)
 
 
+@test
+def powershell_names_lint():
+    import lint_ps
+    root = os.path.dirname(HERE)
+    files = [os.path.join(root, "installer.template.ps1")] + [
+        os.path.join(SRC, f) for f in sorted(os.listdir(SRC)) if f.endswith(".ps1")]
+    assert sum(lint_ps.lint(f) for f in files) == 0, "undefined variable or command in a PowerShell file"
+    # the lint itself must catch a mistyped variable and a mistyped function
+    gui = open(os.path.join(SRC, "PodcastStudio.ps1"), encoding="utf-8").read()
+    broken = gui.replace("$cOutline.Text = $lines -join", "$cOutlin.Text = $lines -join", 1)
+    broken = broken.replace("Load-Scenes $false", "Load-Scene $false", 1)
+    assert broken != gui
+    path = os.path.join(tempfile.mkdtemp(), "broken.ps1")
+    open(path, "w", encoding="utf-8").write(broken)
+    assert lint_ps.lint(path) == 2, "lint should report exactly the two planted mistakes"
+
+
+@test
+def app_smoke_test_is_wired():
+    gui = open(os.path.join(SRC, "PodcastStudio.ps1"), encoding="utf-8").read()
+    runner = open(os.path.join(SRC, "Test-PodcastStudio.ps1"), encoding="utf-8").read()
+    assert gui.lstrip().startswith("#") and "param([switch]$SmokeTest)" in gui
+    first_code = next(line for line in gui.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+    assert first_code.startswith("param("), "param() must be the first statement or PowerShell rejects it"
+    assert "-SmokeTest" in runner and "gui-smoke.json" in gui
+    assert len([line for line in gui.splitlines() if line.startswith("Check '")]) >= 9
+
+
 def main():
     global ENV
     if not shutil.which("ffmpeg"):

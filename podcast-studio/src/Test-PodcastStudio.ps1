@@ -1,6 +1,7 @@
 # Podcast Studio self-test. Quick by default; -Full also loads the language model and the voice clone.
 #   powershell -ExecutionPolicy Bypass -File Test-PodcastStudio.ps1 [-Full] [-Model gemma3:4b]
-param([switch]$Full, [string]$Model = 'gemma3:4b')
+#   -NoGui skips the invisible app smoke test.
+param([switch]$Full, [string]$Model = 'gemma3:4b', [switch]$NoGui)
 $Root = Split-Path $PSScriptRoot -Parent
 $Py = Join-Path $Root 'venv\Scripts\python.exe'
 $bad = 0
@@ -22,4 +23,12 @@ $argv = @('-u', (Join-Path $PSScriptRoot 'selftest.py'), '--root', $Root, '--mod
 if ($Full) { $argv += '--full' }
 & $Py @argv
 if ($LASTEXITCODE -ne 0) { $bad++ }
+
+if (-not $NoGui) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'PodcastStudio.ps1') -SmokeTest
+    if ($LASTEXITCODE -ne 0) {
+        $bad++
+        Write-Host "  [FAIL] app smoke test - see $Root\logs\gui-smoke.json" -ForegroundColor Red
+    }
+}
 exit $bad
