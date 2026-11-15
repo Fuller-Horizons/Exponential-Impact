@@ -3,9 +3,9 @@ import argparse
 import os
 import re
 
-import numpy as np
+from common import fail, log, read_text
 
-from common import fail, log
+MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
 
 def chunk_text(text, limit=280):
@@ -24,6 +24,64 @@ def chunk_text(text, limit=280):
     return chunks
 
 
+class Voice:
+    """Loads the model once and speaks many texts in one cloned voice."""
+
+    def __init__(self, ref_audio, ref_text=None, model=MODEL, device="cuda", language="English"):
+        import torch
+
+        self.torch = torch
+        self.model_id, self.language = model, language
+        self.ref_audio, self.ref_text = ref_audio, (ref_text or None)
+        self.device = device if (device == "cpu" or torch.cuda.is_available()) else "cpu"
+        if self.device != device:
+            log("CUDA not available - using CPU (slow).")
+        self._load(torch.float16 if self.device == "cuda" else torch.float32)
+
+    def _load(self, dtype):
+        from qwen_tts import Qwen3TTSModel
+
+        log(f"Loading {self.model_id} on {self.device} ({dtype})...")
+        self.dtype = dtype
+        self.model = Qwen3TTSModel.from_pretrained(
+            self.model_id, device_map="cuda:0" if self.device == "cuda" else "cpu", dtype=dtype)
+        self.prompt = self.model.create_voice_clone_prompt(
+            ref_audio=self.ref_audio, ref_text=self.ref_text, x_vector_only_mode=self.ref_text is None)
+
+    def _generate(self, text):
+        import numpy as np
+
+        wavs, sr = self.model.generate_voice_clone(text=text, language=self.language,
+                                                   voice_clone_prompt=self.prompt)
+        return np.asarray(wavs[0], dtype=np.float32), sr
+
+    def speak(self, text, out_wav, pause=0.25):
+        """Synthesize `text` to `out_wav`. Falls back to fp32 if fp16 yields silence/NaN (some GTX cards)."""
+        import numpy as np
+        import soundfile as sf
+
+        pieces, sr = [], 24000
+        for chunk in chunk_text(text):
+            wav, sr = self._generate(chunk)
+            bad = (not np.isfinite(wav).all()) or float(np.abs(wav).max(initial=0)) < 1e-4
+            if bad and self.dtype == self.torch.float16:
+                log("  fp16 produced invalid audio - reloading in fp32")
+                del self.model
+                self.torch.cuda.empty_cache()
+                self._load(self.torch.float32)
+                wav, sr = self._generate(chunk)
+            pieces += [np.nan_to_num(wav), np.zeros(int(sr * pause), dtype=np.float32)]
+            if self.device == "cuda":
+                self.torch.cuda.empty_cache()
+        os.makedirs(os.path.dirname(os.path.abspath(out_wav)), exist_ok=True)
+        sf.write(out_wav, np.concatenate(pieces), sr)
+        return out_wav
+
+    def peak_mb(self):
+        t = self.torch
+        return int(t.cuda.max_memory_allocated() / 2 ** 20) if t.cuda.is_available() else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--script", required=True, help="Text file with the narration")
@@ -31,50 +89,20 @@ def main():
     ap.add_argument("--ref-text", help="Text file with the reference transcript (better quality)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--language", default="English")
-    ap.add_argument("--model", default="Qwen/Qwen3-TTS-12Hz-0.6B-Base")
+    ap.add_argument("--model", default=MODEL)
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    ap.add_argument("--pause", type=float, default=0.25, help="Seconds of silence between chunks")
     a = ap.parse_args()
 
-    import soundfile as sf
-    import torch
-    from qwen_tts import Qwen3TTSModel
-
-    with open(a.script, encoding="utf-8") as f:
-        text = f.read().strip()
+    text = read_text(a.script).strip()
     if not text:
         fail("Script is empty")
     ref_text = None
     if a.ref_text and os.path.exists(a.ref_text):
-        with open(a.ref_text, encoding="utf-8") as f:
-            ref_text = f.read().strip() or None
+        ref_text = read_text(a.ref_text).strip() or None
 
-    device = a.device
-    if device == "cuda" and not torch.cuda.is_available():
-        log("CUDA not available - falling back to CPU (slow).")
-        device = "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    log(f"Loading {a.model} on {device} ({dtype})...")
-    model = Qwen3TTSModel.from_pretrained(
-        a.model, device_map="cuda:0" if device == "cuda" else "cpu", dtype=dtype)
-
-    prompt = model.create_voice_clone_prompt(
-        ref_audio=a.ref_audio, ref_text=ref_text, x_vector_only_mode=ref_text is None)
-
-    chunks = chunk_text(text)
-    pieces, sr = [], None
-    for i, chunk in enumerate(chunks, 1):
-        log(f"[{i}/{len(chunks)}] {chunk[:70]}...")
-        wavs, sr = model.generate_voice_clone(text=chunk, language=a.language,
-                                              voice_clone_prompt=prompt)
-        pieces.append(np.asarray(wavs[0], dtype=np.float32))
-        pieces.append(np.zeros(int(sr * a.pause), dtype=np.float32))
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    sf.write(a.out, np.concatenate(pieces), sr)
-    log(f"Saved voiceover: {a.out}")
+    voice = Voice(a.ref_audio, ref_text, a.model, a.device, a.language)
+    voice.speak(text, a.out)
+    log(f"Saved voiceover: {a.out}  (peak VRAM {voice.peak_mb()} MiB)")
 
 
 if __name__ == "__main__":

@@ -1,26 +1,26 @@
 # Podcast Studio workspace
 
-Local pipeline for turning podcast episodes into new short videos. Hardware: 4 GB GeForce GPU, 16 GB RAM.
-Heavy video generation is offloaded to fal.ai (pay per second); everything else runs locally.
+Local pipeline that turns a prompt into a short video in the podcast's style.
+Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
 ## Layout
-- `analysis/` - frames + transcripts from the watch skill and faster-whisper
+- `projects/<name>/` - one folder per video: `project.json`, `outline.txt`, `script.json`, `voice/`, `visuals/`, `scenes/`, `final.mp4`, `metrics.json`
+- `library/index.json` - searchable transcript index of the episode footage
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
-- `scripts/` - narration scripts
-- `clips/` - generated or source clips
-- `output/` - finished videos
-- `style-bible.md` - the show's distilled style (create it from `analysis/`)
+- `analysis/` - frames + transcripts from the watch skill and faster-whisper
+- `style-bible.md` - the show's distilled style; the outline and script stages read it when present
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
-- Analyze: `python ..\repos\claude-video\skills\watch\scripts\watch.py <url|file> --engine local --detail balanced --out-dir analysis`
-- Transcribe: `python ..\app\captions.py <file> --out analysis\<name>`
+- Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
+- One stage: `--stage script|voice|visuals|render` (add `--force` to redo it)
+- Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
-- Voiceover: `python ..\app\tts.py --script scripts\x.txt --ref-audio voice\host.wav --ref-text voice\host.txt --out output\x.wav`
-- Cloud clip: `python ..\app\fal_generate.py --endpoint <fal id> --prompt "..." --image frame.png [--video v.mp4 --audio a.wav] --out clips\x.mp4`
-- Assemble: `python ..\app\assemble.py --clips a.mp4 b.mp4 --voice output\x.wav --format 9:16 --captions --out output\final.mp4`
-- Motion graphics / kinetic captions: use the `/hyperframes` skill (`hyperframes` CLI, Node 22+).
+- One visual: `python ..\app\visuals.py card "Text" --out clips\c.mp4 --seconds 4`
+- Assemble by hand: `python ..\app\assemble.py --clips a.mp4 b.mp4 --voice v.wav --format 9:16 --captions --out output\final.mp4`
+- Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full]`
+- Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
 
 ## Rules
 - Only clone voices of people who have consented.
-- Keep `FAL_KEY` in the user environment, never in files.
-- Before generating, read `style-bible.md` and match hooks, pacing, length and caption style.
+- `script.json` scenes: `narration`, `visual` (footage | card | still), `query`, `card_text`, `image_prompt`.
+- Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.

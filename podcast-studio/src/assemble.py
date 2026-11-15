@@ -5,18 +5,7 @@ import shutil
 import subprocess
 import tempfile
 
-from common import fail, log, run, transcribe, write_srt
-
-FORMATS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
-
-
-def duration(path):
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                          "-of", "default=nw=1:nk=1", path], capture_output=True, text=True)
-    try:
-        return float(out.stdout.strip())
-    except ValueError:
-        return 0.0
+from common import FORMATS, duration, fail, log, run, transcribe, write_srt
 
 
 def has_audio(path):
@@ -99,9 +88,10 @@ def main():
             segs = transcribe(a.voice or stage)
             write_srt(segs, os.path.join(tmp, "subs.srt"))
             shutil.copy(os.path.join(tmp, "subs.srt"), os.path.splitext(a.out)[0] + ".srt")
+            # libass lays SRT out on a 288-line canvas, so size and margin are in those units
             size = 16 if H > W else 12
             style = (f"FontName=Arial,FontSize={size},Bold=1,PrimaryColour=&H00FFFFFF,"
-                     f"OutlineColour=&H00000000,Outline=3,Shadow=0,Alignment=2,MarginV={int(H * 0.08)}")
+                     f"OutlineColour=&H00000000,Outline=3,Shadow=0,Alignment=2,MarginV={28 if H > W else 20}")
             capt = os.path.join(tmp, "capt.mp4")
             run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", os.path.basename(stage),
                  "-vf", f"subtitles=subs.srt:force_style='{style}'", "-c:v", "libx264",

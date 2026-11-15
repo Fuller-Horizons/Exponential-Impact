@@ -1,4 +1,4 @@
-# Podcast Studio - local GUI for: analyze -> clone voice -> cloud clips (fal.ai) -> assemble
+# Podcast Studio - local GUI: prompt -> outline -> script -> voice -> visuals -> video (all on this PC)
 # Windows PowerShell 5.1+.  Launch:  powershell -ExecutionPolicy Bypass -File PodcastStudio.ps1
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -9,7 +9,7 @@ $Py     = Join-Path $Root 'venv\Scripts\python.exe'
 $Work   = Join-Path $Root 'workspace'
 $Watch  = Join-Path $Root 'repos\claude-video\skills\watch\scripts\watch.py'
 $LogDir = Join-Path $Root 'logs'
-foreach ($d in 'analysis','voice','scripts','clips','output','frames') { New-Item -ItemType Directory -Force -Path (Join-Path $Work $d) | Out-Null }
+foreach ($d in 'analysis','voice','scripts','clips','output','frames','projects','library') { New-Item -ItemType Directory -Force -Path (Join-Path $Work $d) | Out-Null }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 $env:PYTHONUNBUFFERED = '1'
@@ -167,6 +167,87 @@ $btnClaude.Add_Click({
     Start-Process powershell.exe -WorkingDirectory $Work -ArgumentList '-NoExit', '-Command', 'claude'
 })
 
+# ================================================================ TAB 0: Create (prompt -> outline -> video, all local)
+$t0 = New-Tab 'Create (prompt to video)'
+Add-Label $t0 'Project name' 10 12 | Out-Null
+$cName = Add-Text $t0 150 12 170 'my-video'
+Add-Label $t0 'Length (s)' 335 12 70 | Out-Null
+$cSecs = Add-Text $t0 405 12 45 '45'
+Add-Label $t0 'Format' 465 12 50 | Out-Null
+$cFmt = Add-Combo $t0 515 12 70 @('9:16', '16:9', '1:1')
+Add-Label $t0 'Local model' 600 12 80 | Out-Null
+$cModel = Add-Combo $t0 685 12 225 @('gemma3:4b', 'qwen3:4b', 'phi4-mini', 'llama3.2:3b') $true
+Add-Label $t0 'Video topic / prompt' 10 47 | Out-Null
+$cPrompt = Add-Text $t0 150 47 760 '' 50
+Add-Label $t0 'Voice sample WAV' 10 107 | Out-Null
+$cVoice = Add-Text $t0 150 107 640
+$b = Add-Button $t0 'Browse...' 800 105 110; $b.Add_Click({ $f = Pick-File $AudioFilter (Join-Path $Work 'voice'); if ($f) { $cVoice.Text = $f } })
+Add-Label $t0 'Episode folder' 10 142 | Out-Null
+$cLib = Add-Text $t0 150 142 400
+$b = Add-Button $t0 'Browse...' 560 140 90
+$b.Add_Click({ $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq 'OK') { $cLib.Text = $d.SelectedPath } })
+$b = Add-Button $t0 'Index footage' 660 140 130
+$b.Add_Click({
+    if (-not (Test-Path $cLib.Text)) { Msg 'Pick the folder that holds your episode video files.'; return }
+    Run-Py 'Index footage library' 'library.py' @('index', $cLib.Text, '--lib', (Join-Path $Work 'library'))
+})
+$cStills = New-Object System.Windows.Forms.CheckBox
+$cStills.Text = 'AI stills'; $cStills.Location = New-Object System.Drawing.Point(805, 142); $cStills.Size = New-Object System.Drawing.Size(105, 24)
+$t0.Controls.Add($cStills)
+
+function Get-Project {
+    $name = ($cName.Text -replace '[^\w\-]', '-').Trim('-')
+    if (-not $name) { Msg 'Enter a project name.'; return $null }
+    $dir = Join-Path $Work "projects\$name"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    return $dir
+}
+function Get-ProjectArgs([string]$dir, [string]$stage) {
+    [System.IO.File]::WriteAllText((Join-Path $dir 'prompt.txt'), $cPrompt.Text)
+    $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
+        '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
+        '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }))
+    if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
+    return $argv
+}
+
+$b = Add-Button $t0 '1. Draft outline' 150 180 150
+$b.Add_Click({
+    if (-not $cPrompt.Text.Trim()) { Msg 'Describe the video first.'; return }
+    $dir = Get-Project; if (-not $dir) { return }
+    $script:ctx = @{ dir = $dir }
+    Run-Py 'Draft outline (local model)' 'pipeline.py' ((Get-ProjectArgs $dir 'outline') + '--force') {
+        $f = Join-Path $script:ctx.dir 'outline.txt'
+        if (Test-Path $f) { $cOutline.Text = ([System.IO.File]::ReadAllText($f) -replace "`r?`n", "`r`n") }
+    }
+})
+$b = Add-Button $t0 '2. Approve + make video' 310 180 190
+$b.Add_Click({
+    if (-not $cOutline.Text.Trim()) { Msg 'Draft an outline first (or type one).'; return }
+    if (-not (Test-Path $cVoice.Text)) { Msg 'Pick a reference voice WAV (make one in the Voice clone tab).'; return }
+    $dir = Get-Project; if (-not $dir) { return }
+    [System.IO.File]::WriteAllText((Join-Path $dir 'outline.txt'), $cOutline.Text)
+    $script:ctx = @{ dir = $dir }
+    Run-Py 'Make video (script, voice, visuals, render)' 'pipeline.py' (Get-ProjectArgs $dir 'all') {
+        $f = Join-Path $script:ctx.dir 'final.mp4'
+        if (Test-Path $f) { $script:lastFinal = $f; Start-Process explorer.exe "/select,`"$f`"" }
+    }
+})
+$b = Add-Button $t0 'Open project' 510 180 120
+$b.Add_Click({ $dir = Get-Project; if ($dir) { Start-Process explorer.exe $dir } })
+$b = Add-Button $t0 'Self-test' 640 180 100
+$b.Add_Click({
+    Start-Job2 'Self-test (quick)' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $App 'Test-PodcastStudio.ps1'), '-Model', $cModel.Text)
+})
+$b = Add-Button $t0 'Full self-test' 750 180 160
+$b.Add_Click({
+    Start-Job2 'Self-test (full: loads models, measures VRAM)' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $App 'Test-PodcastStudio.ps1'), '-Full', '-Model', $cModel.Text)
+})
+Add-Label $t0 'Outline (editable)' 10 220 | Out-Null
+$cOutline = Add-Text $t0 150 220 760 '' 185
+$n0 = Add-Label $t0 'Runs fully on this PC: Ollama writes the outline and script, Qwen3-TTS speaks it, visuals come from your indexed episodes, text cards and optional AI stills. A failed run resumes: press step 2 again.' 150 408 760
+$n0.Size = New-Object System.Drawing.Size(760, 34)
+
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab '1 - Analyze'
 Add-Label $t1 'YouTube URL or file' 10 15 | Out-Null
@@ -232,6 +313,7 @@ $b.Add_Click({
     $script:ctx = @{ wav = (Join-Path $vd "$($vName.Text).wav"); txt = (Join-Path $vd "$($vName.Text).txt") }
     Run-Py 'Extract voice sample' 'extract_voice.py' @($vSrc.Text, '--start', $vStart.Text, '--duration', $vDur.Text, '--outdir', $vd, '--name', $vName.Text) {
         $vRef.Text = $script:ctx.wav
+        $cVoice.Text = $script:ctx.wav
         if (Test-Path $script:ctx.txt) { $vRefText.Text = Get-Content $script:ctx.txt -Raw -Encoding UTF8 }
     }
 })
@@ -394,14 +476,18 @@ $b.Add_Click({
 $n4 = Add-Label $t4 'Render MP4 = fast ffmpeg assembly on CPU. HyperFrames = Claude Code builds an animated HTML edit and renders it (Node 22 + Chromium, CPU).' 10 360 900
 $n4.Size = New-Object System.Drawing.Size(900, 40)
 
+# fal.ai is optional: move it to the end
+$tabs.TabPages.Remove($t3); $t3.Text = '5 - Cloud video (optional, fal.ai)'; $tabs.TabPages.Add($t3)
+$tabs.SelectedIndex = 0
+
 # ---------------------------------------------------------------- startup checks
 $form.Add_Shown({
     Log "Podcast Studio  |  root: $Root"
-    foreach ($tool in 'ffmpeg', 'yt-dlp', 'node', 'claude') {
+    foreach ($tool in 'ffmpeg', 'yt-dlp', 'ollama', 'node', 'claude') {
         if (Get-Command $tool -ErrorAction SilentlyContinue) { Log "  [ok] $tool" } else { Log "  [missing] $tool - re-run setup" }
     }
     if (Test-Path $Py) { Log '  [ok] python venv' } else { Log '  [missing] python venv - re-run setup' }
-    if ($env:FAL_KEY) { Log '  [ok] fal.ai key' } else { Log '  [info] no fal.ai key yet (tab 3 > Set fal.ai key)' }
+    if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
 [void]$form.ShowDialog()

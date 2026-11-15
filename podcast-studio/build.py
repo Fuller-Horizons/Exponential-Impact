@@ -2,8 +2,11 @@
 import pathlib
 
 here = pathlib.Path(__file__).parent
-order = ["PodcastStudio.ps1", "common.py", "extract_voice.py", "tts.py",
-         "fal_generate.py", "captions.py", "assemble.py", "CLAUDE.md"]
+order = ["PodcastStudio.ps1", "Test-PodcastStudio.ps1", "common.py", "llm.py", "library.py", "visuals.py",
+         "tts.py", "pipeline.py", "assemble.py", "captions.py", "extract_voice.py", "fal_generate.py",
+         "selftest.py", "CLAUDE.md"]
+missing = {p.name for p in (here / "src").iterdir() if p.is_file()} - set(order)
+assert not missing, f"not embedded: {missing}"
 blocks = []
 for name in order:
     text = (here / "src" / name).read_text(encoding="utf-8").replace("\r\n", "\n")
