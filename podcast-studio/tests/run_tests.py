@@ -35,8 +35,11 @@ def run_one(fn):
         results.append((fn.__name__, True, ""))
         print(f"  pass  {fn.__name__} ({time.time() - t0:.1f}s)", flush=True)
     except Exception as e:  # noqa: BLE001
-        results.append((fn.__name__, False, f"{type(e).__name__}: {e}"))
-        print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        where = next((f"line {fr.lineno}" for fr in reversed(traceback.extract_tb(e.__traceback__))
+                      if fr.filename == os.path.abspath(__file__)), "")
+        results.append((fn.__name__, False, f"{type(e).__name__}: {e} ({where})"))
+        print(f"  FAIL  {fn.__name__} at {where}: {type(e).__name__}: {e}", flush=True)
 
 
 def sh(*cmd, env=None, ok=0):
@@ -835,7 +838,7 @@ def optional_services_per_project():
     sh(PY, os.path.join(SRC, "services.py"), "set", "--project", other, "--off", "vidiq", env=ENV)
     assert not services.load(other)["services"]["vidiq"] and services.load(proj)["services"]["vidiq"]
     rules = services.block(proj)
-    assert "vidIQ: allowed, up to 30 credits (0 already used)" in rules and "Before every paid call" in rules
+    assert "vidIQ: allowed, up to 30 credits for this project (0 already used)" in rules and "Before every paid call" in rules
     assert "only connected to Claude" in services.block(proj, "codex")
     path = services.task(proj, "ideas")
     text = open(path).read()
