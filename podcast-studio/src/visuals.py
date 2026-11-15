@@ -351,14 +351,44 @@ def _encode(src, start, seconds, out_mp4, graph, sound):
               *venc(20), out_mp4])
 
 
-def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
-    """Cut between the two hosts following who is speaking; the wide/stacked shot when both or neither are."""
+def sidecar(src):
+    """Speaker data written by a multi-track import (multitrack.py), or None."""
+    from common import read_json
+    data = read_json(src + ".speakers.json")
+    return data if isinstance(data, dict) and data.get("boxes") and data.get("timeline") else None
+
+
+def sidecar_shots(data, start, seconds, hold=0.4):
+    """The recorded who-spoke-when for [start, start + seconds], relative to start; very short edges are merged."""
+    end, out = start + seconds, []
+    for a, b, who in data["timeline"]:
+        a, b = max(a, start), min(b, end)
+        if b - a <= 0:
+            continue
+        if out and (b - a < hold or out[-1][2] == who):
+            out[-1][1] = b - start
+        else:
+            out.append([a - start, b - start, who])
+    if len(out) > 1 and out[0][1] - out[0][0] < hold:
+        out[1][0] = 0.0
+        out.pop(0)
+    return [tuple(x) for x in out] or [(0.0, seconds, "both")]
+
+
+def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio, shots=None):
+    """Cut between the people following who is speaking; the wide/stacked shot when both or neither are.
+
+    `shots` comes from a multi-track import's recorded timing; otherwise the LR-ASD model estimates it.
+    """
     import speaker
 
     (W, H), (src_w, src_h) = size, src_size
-    left, right = (boxes[0][0], boxes[0][1]), (boxes[1][0], boxes[1][1])
-    shots = speaker.timeline(src, start, seconds, boxes)
-    both = ("stack", left, right) if H > W else ("wide", left, right)
+    spots = [(b[0], b[1]) for b in boxes]
+    shots = shots or speaker.timeline(src, start, seconds, boxes)
+    if len(spots) == 2:
+        both = ("stack", spots[0], spots[1]) if H > W else ("wide", spots[0], spots[1])
+    else:
+        both = ("wide", None, None)                 # three or four people: the whole grid
     tmp = out_mp4 + ".parts"
     os.makedirs(tmp, exist_ok=True)
     names = []
@@ -366,8 +396,9 @@ def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
         t0, t1 = round(t0 * 30) / 30, round(t1 * 30) / 30
         if t1 - t0 < 1 / 30:
             continue
-        layout = both if who == "both" else ("single", (left, right)[who])
-        log(f"  {t0:5.1f}-{t1:5.1f}s  {'both' if who == 'both' else ('left', 'right')[who] + ' host speaking'}")
+        layout = both if who == "both" else ("single", spots[who])
+        label = "everyone" if who == "both" else (("left", "right")[who] + " host" if len(spots) == 2 else f"person {who + 1}")
+        log(f"  {t0:5.1f}-{t1:5.1f}s  {label}{'' if who == 'both' else ' speaking'}")
         name = f"p{n:03}.mp4"
         _encode(src, start + t0, t1 - t0, os.path.join(tmp, name), footage_filter(src_w, src_h, W, H, layout), ["-an"])
         names.append(name)
@@ -395,6 +426,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     from common import video_size
 
     W, H = FORMATS[fmt]
+    recorded = sidecar(src)                         # exact speaker timing from a multi-track import
     src = working_copy(src)
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
@@ -404,13 +436,17 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     if layout is None:
         if choice not in FRAMINGS:
             choice = "auto"
-        frames = detect_faces(src, start, seconds, samples=10 if choice == "speaker" else 6)
+        if recorded:                                # people sit in known tiles: no need to look for faces
+            frames = [[tuple(b) for b in recorded["boxes"]]] * 6
+        else:
+            frames = detect_faces(src, start, seconds, samples=10 if choice == "speaker" else 6)
         if choice == "speaker":
-            boxes = find_host_boxes(frames)
+            boxes = [tuple(b) for b in recorded["boxes"]] if recorded else find_host_boxes(frames)
             try:
-                if len(boxes) != 2:
+                if len(boxes) < 2:
                     raise RuntimeError("two hosts were not found on screen")
-                shots = _speaker_cut(src, start, seconds, out_mp4, (W, H), (src_w, src_h), boxes, audio)
+                shots = _speaker_cut(src, start, seconds, out_mp4, (W, H), (src_w, src_h), boxes, audio,
+                                     shots=sidecar_shots(recorded, start, seconds) if recorded else None)
                 log(f"  framing: speaker ({shots} shot{'s' if shots != 1 else ''})")
                 return "speaker"
             except Exception as e:  # noqa: BLE001 - never lose the scene over framing

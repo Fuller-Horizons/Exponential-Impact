@@ -33,6 +33,11 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
 
+## Connections (Settings tab)
+- `python ..\app\connections.py check` saves which services are connected in `connections.json`. A service that is not connected must not be used.
+- Riverside separate tracks: `python ..\app\multitrack.py import --folder <tracks> --name <episode> --episodes episodes --lib library`
+  writes `<episode>.mp4` plus `<episode>.mp4.speakers.json` (who speaks when, from each person's own audio), used by Active speaker framing.
+
 ## Outside services (optional, per project)
 - Before using Higgsfield, vidIQ or any other outside service, read the project's rules: `python ..\app\services.py block --project <project folder>`.
   A service that is off must not be used. Allowed services have a credit cap: quote each cost, wait for a yes, and log every paid call in the project's `services-log.md`.

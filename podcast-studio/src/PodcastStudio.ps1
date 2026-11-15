@@ -72,6 +72,17 @@ function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
     [System.IO.File]::AppendAllText($file, "- $text`n")
     return $true
 }
+function Get-Connections {
+    # Last saved result of the Settings tab's checks (workspace\connections.json); nothing is connected until checked
+    $f = Join-Path $Work 'connections.json'
+    if (Test-Path $f) { try { return ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json) } catch { } }
+    return [pscustomobject]@{ services = [pscustomobject]@{}; folders = [pscustomobject]@{} }
+}
+function Test-Connected([string]$service) {
+    $c = Get-Connections
+    $entry = $c.services.$service
+    return [bool]($entry -and $entry.connected)
+}
 function Get-ServicesBlock([string]$project, [string]$editor) {
     # The project's service rules (which outside services are allowed, caps, spend so far), added to every agent prompt
     if (-not $project -or -not (Test-Path $Py)) { return '' }
@@ -462,6 +473,12 @@ $lr.Size = New-Object System.Drawing.Size(135, 80)
 Add-Label $tR 'Editor' 10 255 135 | Out-Null
 $rEditor = Add-Combo $tR 10 280 135 @('Claude Code', 'Codex (ChatGPT)')
 function Get-Editor { if ($rEditor.SelectedIndex -eq 1) { return 'codex' } else { return 'claude' } }
+$rEditor.Add_SelectedIndexChanged({
+    if ($rEditor.SelectedIndex -eq 1 -and -not (Test-Connected 'codex')) {
+        $rEditor.SelectedIndex = 0
+        Msg 'Codex is not connected. Connect it in the Settings tab first.'
+    }
+})
 
 function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
 function Get-RecordingProject {
@@ -846,19 +863,19 @@ $vWhich = Add-Label $tV '' 410 12 380
 $b = Add-Button $tV 'Load' 800 10 110
 $b.Add_Click({ Load-Services $false })
 $vHigg = New-Object System.Windows.Forms.CheckBox
-$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(120, 24)
+$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(125, 24); $vHigg.Enabled = $false
 $tV.Controls.Add($vHigg)
 Add-Label $tV 'cap' 275 50 30 | Out-Null
 $vHiggCap = Add-Text $tV 305 50 55 '200'
 Add-Label $tV 'credits. Generated B-roll, dubbing, upscaling, reframing.' 365 50 545 | Out-Null
 $vVid = New-Object System.Windows.Forms.CheckBox
-$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(120, 24)
+$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(125, 24); $vVid.Enabled = $false
 $tV.Controls.Add($vVid)
 Add-Label $tV 'cap' 275 85 30 | Out-Null
 $vVidCap = Add-Text $tV 305 85 55 '100'
 Add-Label $tV 'credits. Topic ideas, title scores, thumbnails, music beds.' 365 85 545 | Out-Null
 $vDrive = New-Object System.Windows.Forms.CheckBox
-$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(120, 24)
+$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(125, 24); $vDrive.Enabled = $false
 $tV.Controls.Add($vDrive)
 $vFolder = Add-Text $tV 275 120 515
 $b = Add-Button $tV 'Drive folder...' 800 118 110
@@ -883,6 +900,11 @@ function Load-Services([bool]$quiet) {
     $raw = & $Py -u (Join-Path $App 'services.py') json --project $p 2>$null | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $raw.Trim()) { if (-not $quiet) { Msg 'Could not read the service settings.' }; return }
     $c = $raw | ConvertFrom-Json
+    foreach ($pair in @(@($vHigg, 'higgsfield', 'Higgsfield'), @($vVid, 'vidiq', 'vidIQ'), @($vDrive, 'drive', 'Google Drive'))) {
+        $box, $key, $label = $pair
+        $box.Enabled = [bool]$c.available.$key
+        $box.Text = if ($box.Enabled) { $label } else { "$label (not connected)" }
+    }
     $vHigg.Checked = [bool]$c.services.higgsfield; $vVid.Checked = [bool]$c.services.vidiq; $vDrive.Checked = [bool]$c.services.drive
     $vHiggCap.Text = [string]$c.caps.higgsfield; $vVidCap.Text = [string]$c.caps.vidiq; $vFolder.Text = [string]$c.drive_folder
     $vSpent.Text = "Used so far: Higgsfield $($c.spent.higgsfield), vidIQ $($c.spent.vidiq) credits"
@@ -940,10 +962,110 @@ $b.Add_Click({
     $f = Join-Path $p 'services-log.md'
     if (Test-Path $f) { Start-Process notepad.exe $f } else { Msg 'No paid service has been used for this project yet.' }
 })
-$nV = Add-Label $tV ('Everything in Podcast Studio works with all of these off, which is the default. Higgsfield and vidIQ are connected to your Claude account, so ' +
+$nV = Add-Label $tV ('Everything works with all of these off, the default. A service can only be ticked once it is connected in the Settings tab. Higgsfield and vidIQ are connected to your Claude account, so ' +
     'only Claude Code can use them; Codex cannot. Caps are instructions Claude follows and logs against, not limits the services enforce. ' +
     'Uploading to a service sends your footage to that company.') 10 355 900
 $nV.Size = New-Object System.Drawing.Size(900, 60)
+
+# ================================================================ TAB: Settings (connect outside services once, for the whole app)
+$tG = New-Tab 'Settings'
+$b = Add-Button $tG 'Check all' 10 10 120
+$b.Add_Click({ Run-Py 'Check every connection' 'connections.py' @('check') { Update-Connections } })
+$gWhen = Add-Label $tG '' 140 14 540
+$script:connRows = @{}
+$connList = @(
+    @('claude', 'Claude Code'), @('higgsfield', 'Higgsfield (via Claude)'), @('vidiq', 'vidIQ (via Claude)'),
+    @('codex', 'Codex (ChatGPT plan)'), @('youtube', 'YouTube upload'), @('drive', 'Google Drive folder'),
+    @('riverside', 'Riverside exports folder'), @('fal', 'fal.ai (cloud video)'), @('ollama', 'Ollama (local model)'))
+$y = 48
+foreach ($item in $connList) {
+    $key, $label = $item
+    Add-Label $tG $label 10 $y 200 | Out-Null
+    $st = Add-Label $tG 'not checked' 215 $y 115
+    $dt = Add-Label $tG '' 335 $y 345
+    $cb = Add-Button $tG 'Connect' 690 ($y - 3) 105; $cb.Tag = $key
+    $cb.Add_Click({ Connect-Service ([string]$this.Tag) })
+    $db = Add-Button $tG 'Disconnect' 800 ($y - 3) 110; $db.Tag = $key
+    $db.Add_Click({ Disconnect-Service ([string]$this.Tag) })
+    if ($key -eq 'ollama') { $cb.Text = 'Check'; $db.Enabled = $false }
+    $script:connRows[$key] = @{ status = $st; detail = $dt }
+    $y += 33
+}
+$b = Add-Button $tG 'Import Riverside session...' 10 352 220
+$b.Add_Click({
+    if (-not (Test-Connected 'riverside')) { Msg 'Connect the Riverside exports folder first (the folder you download separate tracks into).'; return }
+    $d = New-Object System.Windows.Forms.FolderBrowserDialog
+    $d.Description = 'Choose the folder holding ONE session''s separate tracks (one video per person).'
+    $d.SelectedPath = [string](Get-Connections).folders.riverside
+    if ($d.ShowDialog() -ne 'OK') { return }
+    $name = (Split-Path $d.SelectedPath -Leaf) -replace '[^\w\- ]', '-'
+    Run-Py "Import Riverside session '$name'" 'multitrack.py' @('import', '--folder', $d.SelectedPath, '--name', $name,
+        '--episodes', (Join-Path $Work 'episodes'), '--lib', (Join-Path $Work 'library'))
+})
+$gNote = Add-Label $tG ('Connect each service once here. A service that is not connected cannot be ticked in the Services tab or chosen as the editor. ' +
+    'Higgsfield and vidIQ are connected on claude.ai, then checked here through Claude Code; its list can occasionally misreport a connector, so a service can still fail when used.') 240 350 670
+$gNote.Size = New-Object System.Drawing.Size(670, 70)
+
+function Update-Connections {
+    $c = Get-Connections
+    $last = ''
+    foreach ($key in $script:connRows.Keys) {
+        $row = $script:connRows[$key]
+        $e = $c.services.$key
+        if ($e) {
+            $row.status.Text = if ($e.connected) { 'connected' } else { 'not connected' }
+            $row.status.ForeColor = if ($e.connected) { [System.Drawing.Color]::ForestGreen } else { [System.Drawing.Color]::Firebrick }
+            $row.detail.Text = [string]$e.detail
+            if ([string]$e.checked -gt $last) { $last = [string]$e.checked }
+        } else {
+            $row.status.Text = 'not checked'; $row.status.ForeColor = [System.Drawing.SystemColors]::ControlText; $row.detail.Text = ''
+        }
+    }
+    $gWhen.Text = if ($last) { "Last checked $last" } else { 'Not checked yet - press Check all.' }
+}
+function Connect-Service([string]$key) {
+    switch ($key) {
+        'claude' { Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', 'Write-Host "Type /login if Claude Code asks you to sign in, then close this window and press Check all."; claude' }
+        { $_ -in 'higgsfield', 'vidiq' } {
+            Start-Process 'https://claude.ai/settings/connectors'
+            Msg 'Connect it on the claude.ai page that just opened (Settings > Connectors), then press Check all here.'
+        }
+        'codex' {
+            if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { Msg 'Codex is not installed. Re-run the installer with -WithCodex.'; return }
+            Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', 'codex login; Write-Host "Close this window and press Check all."'
+        }
+        'youtube' {
+            $secret = Join-Path $Work 'youtube_client_secret.json'
+            if (-not (Test-Path $secret)) {
+                $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
+                if (-not $f) { Msg 'Choose the OAuth "Desktop app" JSON file from Google Cloud Console (see the Publish tab for the steps).'; return }
+                Copy-Item $f $secret -Force
+            }
+            Run-Py 'Sign in to YouTube (your browser opens)' 'publish.py' @('login', '--project', $Work) { Run-Py 'Check YouTube' 'connections.py' @('check', '--service', 'youtube') { Update-Connections } }
+        }
+        { $_ -in 'drive', 'riverside' } {
+            $d = New-Object System.Windows.Forms.FolderBrowserDialog
+            $d.Description = if ($key -eq 'drive') { 'Choose a folder that Google Drive for desktop syncs (for example G:\Shared drives\...)' } else { 'Choose the folder you download Riverside separate tracks into' }
+            if ($d.ShowDialog() -ne 'OK') { return }
+            Run-Py "Connect $key folder" 'connections.py' @('folder', '--service', $key, '--path', $d.SelectedPath) { Update-Connections }
+        }
+        'fal' { $tabs.SelectedTab = $t3; Msg 'Press "Set fal.ai key" on this tab, then come back and press Check all.' }
+        'ollama' { Run-Py 'Check Ollama' 'connections.py' @('check', '--service', 'ollama') { Update-Connections } }
+    }
+}
+function Disconnect-Service([string]$key) {
+    switch ($key) {
+        'claude' { Msg 'To sign out, type /logout inside Claude Code.' }
+        { $_ -in 'higgsfield', 'vidiq' } { Start-Process 'https://claude.ai/settings/connectors'; Msg 'Disconnect it on claude.ai, then press Check all.' }
+        'codex' { & codex logout 2>$null | Out-Null; Run-Py 'Check Codex' 'connections.py' @('check', '--service', 'codex') { Update-Connections } }
+        'fal' {
+            [Environment]::SetEnvironmentVariable('FAL_KEY', $null, 'User'); Remove-Item Env:FAL_KEY -ErrorAction Ignore
+            Run-Py 'Check fal.ai' 'connections.py' @('check', '--service', 'fal') { Update-Connections }
+        }
+        default { Run-Py "Disconnect $key" 'connections.py' @('clear', '--service', $key) { Update-Connections } }
+    }
+}
+Update-Connections
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab 'Analyze'
@@ -1200,6 +1322,7 @@ $form.Add_Shown({
         if (Get-Command $tool -ErrorAction SilentlyContinue) { Log "  [ok] $tool" } else { Log "  [missing] $tool - re-run setup" }
     }
     if (Test-Path $Py) { Log '  [ok] python venv' } else { Log '  [missing] python venv - re-run setup' }
+    if (-not (Test-Path (Join-Path $Work 'connections.json'))) { Log '  [info] outside services are not connected (optional): Settings tab > Check all' }
     if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
@@ -1241,7 +1364,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 10) "expected 10 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 11) "expected 11 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1378,25 +1501,42 @@ Check 'recording tab and house rules' {
     Show-RuleDialog
     'slug, project path, type and rules file'
 }
+Check 'settings tab shows connection status' {
+    Expect ($script:connRows.Count -eq 9) "expected 9 services, found $($script:connRows.Count)"
+    $f = Join-Path $Work 'connections.json'
+    $had = Test-Path $f
+    $keep = if ($had) { [System.IO.File]::ReadAllText($f) } else { '' }
+    [System.IO.File]::WriteAllText($f, '{"services":{"vidiq":{"connected":true,"detail":"ok","checked":"2099-01-01 10:00"},"codex":{"connected":false,"detail":"no","checked":"2099-01-01 10:00"}},"folders":{}}')
+    Update-Connections
+    Expect ($script:connRows['vidiq'].status.Text -eq 'connected' -and $script:connRows['codex'].status.Text -eq 'not connected') 'status labels are wrong'
+    Expect ($script:connRows['youtube'].status.Text -eq 'not checked') 'unchecked services must say so'
+    Expect ((Test-Connected 'vidiq') -and -not (Test-Connected 'codex') -and -not (Test-Connected 'higgsfield')) 'Test-Connected is wrong'
+    $rEditor.SelectedIndex = 1
+    Expect ($rEditor.SelectedIndex -eq 0) 'Codex must not be selectable while it is not connected'
+    $script:connFileBackup = @{ had = $had; text = $keep }
+    'connected, not connected and not checked shown; Codex blocked'
+}
 Check 'services are off by default and save per project' {
     $vScope.SelectedIndex = 0
     Load-Services $true
     Expect (-not $vHigg.Checked -and -not $vVid.Checked -and -not $vDrive.Checked) 'services must start switched off'
+    Expect ($vVid.Enabled -and -not $vHigg.Enabled -and -not $vDrive.Enabled) 'only connected services can be ticked'
+    Expect ($vHigg.Text -match 'not connected') 'disconnected services must say so'
     $vVid.Checked = $true; $vVidCap.Text = '40'
     Expect (Save-Services $false) 'saving failed'
     $saved = [System.IO.File]::ReadAllText((Join-Path $smokeDir 'services.json')) | ConvertFrom-Json
     Expect ($saved.services.vidiq -and -not $saved.services.higgsfield -and $saved.caps.vidiq -eq 40) 'saved switches are wrong'
     $rules = Get-ServicesBlock $smokeDir 'claude'
-    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: OFF') 'prompt rules do not follow the switches'
+    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: (OFF|NOT CONNECTED)') 'prompt rules do not follow the switches'
     Expect ((Get-ServicesBlock $smokeDir 'codex') -match 'only connected to Claude') 'Codex must be told vidIQ is not available to it'
     $vVid.Checked = $false
     [void](Save-Services $false)
     $out = & $Py -u (Join-Path $App 'services.py') task --project $smokeDir --kind ideas 2>&1 | Out-String
     Expect ($LASTEXITCODE -ne 0 -and $out -match 'is off for this project') 'a task must refuse while its service is off'
-    $rEditor.SelectedIndex = 1
-    Expect ((Get-Editor) -eq 'codex') 'editor box does not map to Codex'
-    $rEditor.SelectedIndex = 0
-    'off by default, saved per project, rules reach the prompt, tasks refuse when off'
+    $f = Join-Path $Work 'connections.json'
+    if ($script:connFileBackup.had) { [System.IO.File]::WriteAllText($f, $script:connFileBackup.text) } else { Remove-Item $f -Force }
+    Update-Connections
+    'off by default, only connected services tickable, saved per project, rules reach the prompt, tasks refuse when off'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

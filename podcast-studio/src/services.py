@@ -58,16 +58,31 @@ def _merge(base, extra):
     return base
 
 
-def load(project=None):
-    """Settings in force: all-off defaults, then workspace/settings.json "services", then <project>/services.json."""
+def load(project=None, raw=False):
+    """Settings in force: all-off defaults, then workspace/settings.json "services", then <project>/services.json.
+
+    A service that is not connected on this PC (Settings tab) is reported as off, whatever the project says,
+    unless raw=True. "available" says which services are connected.
+    """
+    import connections
     cfg = _merge(defaults(), (read_json(os.path.join(workspace(), "settings.json"), {}) or {}).get("services_default"))
     if project:
         cfg = _merge(cfg, read_json(os.path.join(project, "services.json"), {}))
+    conn = connections.load()
+    cfg["available"] = {k: connections.connected(k, conn) for k in SERVICES}
+    if not cfg["drive_folder"]:
+        cfg["drive_folder"] = conn["folders"].get("drive", "")
+    if not raw:
+        cfg["services"] = {k: on and cfg["available"][k] for k, on in cfg["services"].items()}
     return cfg
 
 
 def save(project, cfg, as_default=False):
-    data = {"services": cfg["services"], "caps": cfg["caps"], "drive_folder": cfg["drive_folder"]}
+    folder = cfg["drive_folder"]
+    import connections
+    if folder and folder == connections.load()["folders"].get("drive"):
+        folder = ""                        # follow the Settings tab's Drive folder rather than copying it
+    data = {"services": cfg["services"], "caps": cfg["caps"], "drive_folder": folder}
     if as_default:
         path = os.path.join(workspace(), "settings.json")
         settings = read_json(path, {}) or {}
@@ -98,6 +113,9 @@ def block(project, editor="claude"):
     lines = ["", "Outside services for this project (set in Podcast Studio's Services tab):"]
     for key, info in SERVICES.items():
         on = cfg["services"][key]
+        if not cfg["available"][key]:
+            lines.append(f"- {info['name']}: NOT CONNECTED on this PC. Do not use it or try to connect it.")
+            continue
         if key == "drive":
             lines.append(f"- {info['name']}: {'on' if on else 'off'} (Podcast Studio copies files itself; you do not need it).")
             continue
@@ -122,6 +140,8 @@ def block(project, editor="claude"):
 
 def _require(project, service):
     cfg = load(project)
+    if not cfg["available"].get(service):
+        fail(f"{SERVICES[service]['name']} is not connected. Connect it in the Settings tab first.")
     if not cfg["services"].get(service):
         fail(f"{SERVICES[service]['name']} is off for this project. Turn it on in the Services tab first.")
     return cfg
@@ -265,15 +285,19 @@ def main():
         cfg, used = load(project), spent(project)
         for k, info in SERVICES.items():
             extra = f", cap {cfg['caps'][k]}, used {used[k]}" if info["paid"] else f", folder {cfg['drive_folder'] or '-'}"
-            log(f"{info['name']}: {'on' if cfg['services'][k] else 'off'}{extra}")
+            state = ("on" if cfg["services"][k] else "off") if cfg["available"][k] else "not connected"
+            log(f"{info['name']}: {state}{extra}")
     elif a.action == "json":
         import json
         print(json.dumps(dict(load(project), spent=spent(project))))
     elif a.action == "set":
-        cfg = load(project)
+        cfg = load(project, raw=True)
         for k in a.on + a.off:
             if k not in SERVICES:
                 fail(f"Unknown service '{k}'. Use: {', '.join(SERVICES)}")
+        for k in a.on:
+            if not cfg["available"][k]:
+                fail(f"{SERVICES[k]['name']} is not connected. Connect it in the Settings tab first.")
         for k in a.on:
             cfg["services"][k] = True
         for k in a.off:

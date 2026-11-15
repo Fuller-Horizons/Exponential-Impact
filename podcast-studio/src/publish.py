@@ -138,7 +138,7 @@ def youtube_service(secrets, token):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["pack", "upload"])
+    ap.add_argument("action", choices=["pack", "upload", "login"])
     ap.add_argument("--project", required=True)
     ap.add_argument("--model", default="gemma3:4b")
     ap.add_argument("--secrets", help="Google OAuth client_secret JSON (desktop app)")
@@ -147,6 +147,12 @@ def main():
     project = os.path.abspath(a.project)
     if a.action == "pack":
         pack(project, a.model)
+        return
+    if a.action == "login":                 # Settings tab: sign in once, without uploading anything
+        workspace = os.path.dirname(os.path.dirname(project)) if os.path.basename(os.path.dirname(project)) == "projects" else project
+        youtube_service(a.secrets or os.path.join(workspace, "youtube_client_secret.json"),
+                        a.token or os.path.join(workspace, "youtube_token.json"))
+        log("YOUTUBE: signed in")
         return
     final = os.path.join(project, "final.mp4")
     if not os.path.exists(final):

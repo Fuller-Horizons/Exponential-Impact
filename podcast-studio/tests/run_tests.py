@@ -820,6 +820,14 @@ def optional_services_per_project():
     proj = os.path.join(ws, "projects", "svc")
     os.makedirs(proj, exist_ok=True)
     open(os.path.join(proj, "prompt.txt"), "w").write("why cash flow matters")
+    import connections
+    # nothing connected yet: no service can be switched on or used
+    assert "is not connected" in sh(PY, os.path.join(SRC, "services.py"), "set", "--project", proj, "--on", "vidiq", env=ENV, ok=1)
+    assert "NOT CONNECTED" in services.block(proj)
+    conn = connections.load()
+    for k in ("higgsfield", "vidiq", "drive"):
+        conn["services"][k] = {"connected": True, "detail": "test", "checked": "2026-11-15 10:00"}
+    connections.save(conn)
     cfg = services.load(proj)
     assert not any(cfg["services"].values()), "every service starts off"
     rules = services.block(proj)
@@ -880,6 +888,77 @@ def optional_services_per_project():
     assert services.spent(PROJECT)["higgsfield"] == 0, "Drive copies cost nothing"
     sh(PY, os.path.join(SRC, "services.py"), "set", "--project", PROJECT, "--off", "higgsfield", "drive", env=ENV)
     os.remove(os.path.join(services.workspace(), "settings.json"))     # drop the test's default
+    # disconnecting a service turns it off everywhere, even where a project had it on
+    sh(PY, os.path.join(SRC, "services.py"), "set", "--project", proj, "--on", "vidiq", env=ENV)
+    conn = connections.load()
+    conn["services"]["vidiq"]["connected"] = False
+    connections.save(conn)
+    assert not services.load(proj)["services"]["vidiq"] and services.load(proj, raw=True)["services"]["vidiq"]
+    assert "vidIQ: NOT CONNECTED" in services.block(proj)
+    assert "is not connected" in sh(PY, os.path.join(SRC, "services.py"), "task", "--project", proj, "--kind", "ideas", env=ENV, ok=1)
+    os.remove(connections.path())
+
+
+@test
+def settings_connection_checks():
+    import connections
+    listing = ("Checking MCP server health...\n\nclaude.ai Higgsfield: https://mcp.example/h - \u2714 Connected\n"
+               "claude.ai vidIQ for Claude: https://mcp.example/v - ! Needs authentication\n"
+               "claude.ai Gmail: https://mcp.example/g - \u2714 Connected\n")
+    found = connections.parse_mcp_list(listing)
+    assert found["higgsfield"][0] and not found["vidiq"][0] and "sign-in" in found["vidiq"][1]
+    assert not connections.parse_mcp_list("claude.ai vidIQ: https://x - \u2717 Failed to connect")["vidiq"][0]
+    assert connections.parse_mcp_list("nothing relevant") == {}
+    # folder services: connect, check, disconnect
+    drive = os.path.join(WORK, "DriveForDesktop")
+    os.makedirs(drive, exist_ok=True)
+    sh(PY, os.path.join(SRC, "connections.py"), "folder", "--service", "drive", "--path", drive, env=ENV)
+    assert connections.connected("drive") and connections.load()["folders"]["drive"] == os.path.abspath(drive)
+    assert "Folder not found" in sh(PY, os.path.join(SRC, "connections.py"), "folder", "--service", "riverside", "--path",
+                                    os.path.join(WORK, "nope"), env=ENV, ok=1)
+    sh(PY, os.path.join(SRC, "connections.py"), "clear", "--service", "drive", env=ENV)
+    assert not connections.connected("drive") and "drive" not in connections.load()["folders"]
+    # a full check runs without Claude Code, Codex or YouTube installed and reports each as not connected
+    out = sh(PY, os.path.join(SRC, "connections.py"), "check", env=ENV)
+    data = connections.load()["services"]
+    assert set(data) == set(connections.SERVICES) and "Claude Code" in out
+    assert data["ollama"]["connected"], "the test language-model server counts as connected"
+    os.remove(connections.path())
+
+
+@test
+def riverside_separate_tracks():
+    import multitrack
+    import visuals
+    folder = os.path.join(WORK, "riverside", "Episode 12")
+    os.makedirs(folder)
+    # two people recorded on their own tracks: host talks 0-4 s, guest talks 5-9 s
+    for name, start in (("Jonathan_Smith-raw-20261115.mp4", 0), ("Guest_Person-raw-20261115.mp4", 5)):
+        sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=10", "-f", "lavfi",
+           "-i", f"sine=f=330:d=10,volume='between(t,{start},{start + 4})':eval=frame", "-c:v", "libx264", "-preset", "ultrafast",
+           "-c:a", "aac", os.path.join(folder, name))
+    episodes = os.path.join(WORK, "ws", "rs-episodes")
+    out = sh(PY, os.path.join(SRC, "multitrack.py"), "import", "--folder", folder, "--name", "episode-12",
+             "--episodes", episodes, env=ENV)
+    video = os.path.join(episodes, "episode-12.mp4")
+    assert "EPISODE" in out and "Jonathan Smith" in out and "Guest Person" in out
+    info = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "csv=p=0", video)
+    assert "video,1920,1080" in info and "audio" in info
+    side = json.load(open(video + ".speakers.json"))
+    names = side["speakers"]
+    host, guest = names.index("Jonathan Smith"), names.index("Guest Person")
+    tl = [(a, b, w) for a, b, w in side["timeline"]]
+    talking = {w: sum(b - a for a, b, x in tl if x == w) for w in (host, guest)}
+    assert 3.0 < talking[host] < 5.5 and 3.0 < talking[guest] < 5.5, tl
+    assert next(w for a, b, w in tl if a <= 2 < b) == host and next(w for a, b, w in tl if a <= 7 < b) == guest, tl
+    # framing uses the recorded timing, not face detection
+    clip = os.path.join(WORK, "rs-speaker.mp4")
+    assert visuals.footage_clip(video, 0, clip, 9.0, "9:16", audio=True, choice="speaker") == "speaker"
+    assert visuals.footage_clip(video, 1, clip, 2.0, "9:16", choice="side") == "side"
+    assert visuals.sidecar_shots(side, 1.0, 2.0)[0][2] == host
+    assert "Found 1 video track" in sh(PY, os.path.join(SRC, "multitrack.py"), "import", "--folder",
+                                       os.path.join(WORK, "eps"), "--name", "x", "--episodes", episodes, env=ENV, ok=1)
+    assert multitrack.speaker_name("zaka_creative_video_a1b2c3d4e5.mov") == "zaka creative"
 
 
 @test

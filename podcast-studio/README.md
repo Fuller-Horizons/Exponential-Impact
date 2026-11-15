@@ -78,6 +78,19 @@ press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file f
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
 optional fal.ai tab for cloud clips. Claude Code buttons are optional extras.
 
+## Settings tab: connect services once
+Each outside service is connected here, once for the whole app: **Connect**, **Disconnect** and **Check all**.
+Higgsfield and vidIQ are connected on claude.ai (the button opens that page) and checked through Claude Code;
+Codex signs in with your ChatGPT plan; YouTube signs in with your Google account; Google Drive and Riverside
+are folders on this PC. A service that is not connected cannot be ticked for a project or chosen as the
+editor, and every agent prompt names it as unavailable.
+
+**Riverside (optional).** Download a session's separate tracks (one video per person) into a folder and press
+**Import Riverside session...**. The app builds one episode with the people side by side, mixes their sound,
+and works out who speaks when from each person's own audio. That timing is exact, so **Active speaker**
+framing and Highlights use it instead of guessing from faces. Each person's track is also a clean source for a
+voice sample. No Riverside account connection is needed; its API is limited to the Business plan.
+
 ## Optional services (all off unless you switch them on)
 The **Services** tab switches outside services on per project, with a credit cap for each paid one. Nothing in
 the app needs them; switched-off services are named in every Claude Code prompt as not allowed.
