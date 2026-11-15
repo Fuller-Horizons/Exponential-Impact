@@ -357,10 +357,26 @@ Add-Type -AssemblyName System.Drawing
 $Root   = Split-Path $PSScriptRoot -Parent
 $App    = $PSScriptRoot
 $Py     = Join-Path $Root 'venv\Scripts\python.exe'
-$Work   = Join-Path $Root 'workspace'
+$Shared = Join-Path $Root 'shared'
+$ProfilesFile = Join-Path $Root 'profiles\profiles.json'
+function Get-ProfileRegistry {
+    # profiles\profiles.json: {"current": name, "profiles": {name: folder}}. Before any profile exists, the
+    # original workspace folder is the profile "Main".
+    if (Test-Path $ProfilesFile) {
+        try {
+            $r = [System.IO.File]::ReadAllText($ProfilesFile) | ConvertFrom-Json
+            if ($r.profiles) { return $r }
+        } catch { }
+    }
+    return [pscustomobject]@{ current = 'Main'; profiles = [pscustomobject]@{ Main = (Join-Path $Root 'workspace') } }
+}
+$script:reg0 = Get-ProfileRegistry
+$Work = [string]$script:reg0.profiles.($script:reg0.current)
+if (-not $Work) { $Work = Join-Path $Root 'workspace' }
+$env:PSTUDIO_WORKSPACE = $Work
 $Watch  = Join-Path $Root 'repos\claude-video\skills\watch\scripts\watch.py'
 $LogDir = Join-Path $Root 'logs'
-foreach ($d in 'analysis','voice','scripts','clips','output','frames','projects','library') { New-Item -ItemType Directory -Force -Path (Join-Path $Work $d) | Out-Null }
+foreach ($d in 'analysis','voice','scripts','clips','output','frames','projects','library','episodes','highlights','music','assets') { New-Item -ItemType Directory -Force -Path (Join-Path $Work $d) | Out-Null }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 $env:PYTHONUNBUFFERED = '1'
@@ -419,7 +435,7 @@ function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
 }
 function Get-Connections {
     # Last saved result of the Settings tab's checks (workspace\connections.json); nothing is connected until checked
-    $f = Join-Path $Work 'connections.json'
+    $f = Join-Path $Shared 'connections.json'
     if (Test-Path $f) { try { return ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json) } catch { } }
     return [pscustomobject]@{ services = [pscustomobject]@{}; folders = [pscustomobject]@{} }
 }
@@ -465,12 +481,12 @@ $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
 # ---------------------------------------------------------------- form
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Podcast Studio'
-$form.Size = New-Object System.Drawing.Size(980, 820)
+$form.Size = New-Object System.Drawing.Size(980, 856)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
 
 $tabs = New-Object System.Windows.Forms.TabControl
-$tabs.Location = New-Object System.Drawing.Point(8, 8)
+$tabs.Location = New-Object System.Drawing.Point(8, 42)
 $tabs.Size = New-Object System.Drawing.Size(950, 470)
 $tabs.Anchor = 'Top,Left,Right'
 $form.Controls.Add($tabs)
@@ -478,13 +494,13 @@ $form.Controls.Add($tabs)
 $log = New-Object System.Windows.Forms.TextBox
 $log.Multiline = $true; $log.ScrollBars = 'Vertical'; $log.ReadOnly = $true
 $log.Font = New-Object System.Drawing.Font('Consolas', 9)
-$log.Location = New-Object System.Drawing.Point(8, 520)
+$log.Location = New-Object System.Drawing.Point(8, 554)
 $log.Size = New-Object System.Drawing.Size(950, 250)
 $log.Anchor = 'Top,Bottom,Left,Right'
 $form.Controls.Add($log)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Location = New-Object System.Drawing.Point(8, 488); $status.Size = New-Object System.Drawing.Size(450, 24)
+$status.Location = New-Object System.Drawing.Point(8, 522); $status.Size = New-Object System.Drawing.Size(450, 24)
 $status.Text = 'Ready.'
 $form.Controls.Add($status)
 
@@ -518,6 +534,148 @@ function New-Tab([string]$title) {
     $p = New-Object System.Windows.Forms.TabPage; $p.Text = $title
     $tabs.TabPages.Add($p); return $p
 }
+
+# ---------------------------------------------------------------- profile bar (one profile per show or persona)
+Add-Label $form 'Profile' 8 8 50 | Out-Null
+$pCombo = New-Object System.Windows.Forms.ComboBox
+$pCombo.DropDownStyle = 'DropDownList'
+$pCombo.Location = New-Object System.Drawing.Point(60, 8); $pCombo.Size = New-Object System.Drawing.Size(200, 24)
+$form.Controls.Add($pCombo)
+$script:pSwitching = $false
+function Fill-ProfileList {
+    $script:pSwitching = $true
+    $reg = Get-ProfileRegistry
+    $pCombo.Items.Clear()
+    foreach ($pp in $reg.profiles.PSObject.Properties) { [void]$pCombo.Items.Add($pp.Name) }
+    if ($pCombo.Items.Contains([string]$reg.current)) { $pCombo.SelectedItem = [string]$reg.current }
+    $script:pSwitching = $false
+}
+function Set-Workspace([string]$dir) {
+    $script:Work = $dir
+    $script:RulesFile = Join-Path $dir 'house-rules.md'
+    $env:PSTUDIO_WORKSPACE = $dir
+    foreach ($d in 'analysis','voice','scripts','clips','output','frames','projects','library','episodes','highlights','music','assets') {
+        New-Item -ItemType Directory -Force -Path (Join-Path $dir $d) | Out-Null
+    }
+}
+function Get-ProfileDefaults {
+    $f = Join-Path $Work 'profile.json'
+    if (Test-Path $f) { try { $m = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json; if ($m.defaults) { return $m.defaults } } catch { } }
+    return $null
+}
+function Apply-ProfileDefaults {
+    # New videos start from the profile's saved choices
+    $d = Get-ProfileDefaults
+    if (-not $d) { return }
+    if ($d.seconds) { $cSecs.Text = [string]$d.seconds }
+    if ($d.format -and $cFmt.Items.Contains([string]$d.format)) { $cFmt.SelectedItem = [string]$d.format }
+    $fl = Get-FramingLabel ([string]$d.framing); if ($fl) { $cFrame.SelectedItem = $fl }
+    if ($d.model) { $cModel.Text = [string]$d.model }
+    if ($null -ne $d.soundbites) { $cBites.Checked = [bool]$d.soundbites }
+    if ($null -ne $d.stills) { $cStills.Checked = [bool]$d.stills }
+    if ($null -ne $d.lipsync) { $cLip.Checked = [bool]$d.lipsync }
+    if ($d.voice) { $cVoice.Text = [string]$d.voice }
+    if ($d.episodes) { $cLib.Text = [string]$d.episodes }
+}
+function Save-ProfileDefaults {
+    $f = Join-Path $Work 'profile.json'
+    $meta = [ordered]@{}
+    if (Test-Path $f) { try { foreach ($pp in ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json).PSObject.Properties) { $meta[$pp.Name] = $pp.Value } } catch { } }
+    $meta['defaults'] = [ordered]@{
+        seconds = $cSecs.Text; format = [string]$cFmt.SelectedItem; framing = $Framings[[string]$cFrame.SelectedItem]
+        model = $cModel.Text; soundbites = [bool]$cBites.Checked; stills = [bool]$cStills.Checked; lipsync = [bool]$cLip.Checked
+        voice = $cVoice.Text; episodes = $cLib.Text }
+    [System.IO.File]::WriteAllText($f, ($meta | ConvertTo-Json -Depth 4))
+}
+function Switch-Profile([string]$name) {
+    $out = & $Py -u (Join-Path $App 'profiles.py') switch --name $name 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg ("Could not switch profile: " + $out.Trim()); Fill-ProfileList; return }
+    $path = ($out -split "`n" | Where-Object { $_ -match '^PROFILE: ' } | Select-Object -First 1) -replace '^PROFILE:\s*', ''
+    Set-Workspace $path.Trim()
+    $cName.Text = 'my-video'; $cPrompt.Text = ''; $cOutline.Text = ''; $cHook.Items.Clear(); $cVoice.Text = ''; $cLib.Text = ''
+    $eList.Items.Clear(); $hList.Items.Clear(); $pTitle.Text = ''; $pDesc.Text = ''; $pTags.Text = ''
+    Load-DefaultModel
+    Apply-ProfileDefaults
+    Load-Services $true
+    Log "Profile: $name ($Work)"
+    if (-not $script:proc) { Run-Py 'Check this profile''s YouTube sign-in' 'connections.py' @('check', '--service', 'youtube') { Update-Connections } }
+}
+$pCombo.Add_SelectedIndexChanged({
+    if ($script:pSwitching -or $pCombo.SelectedIndex -lt 0) { return }
+    if ($script:proc -and -not $script:proc.HasExited) { Msg 'Wait for the running job to finish before switching profile.'; Fill-ProfileList; return }
+    Switch-Profile ([string]$pCombo.SelectedItem)
+})
+function Show-NewProfileDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'New profile'; $f.Size = New-Object System.Drawing.Size(460, 200); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    Add-Label $f 'Name (a show or persona)' 15 15 200 | Out-Null
+    $nm = Add-Text $f 220 15 210
+    $copy = New-Object System.Windows.Forms.CheckBox
+    $copy.Text = "Copy the setup of '$([string]$pCombo.SelectedItem)' (brand kit, style, rules, voice, defaults)"
+    $copy.Location = New-Object System.Drawing.Point(15, 55); $copy.Size = New-Object System.Drawing.Size(420, 40)
+    $f.Controls.Add($copy)
+    $ok = Add-Button $f 'Create' 240 110 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
+    $cancel = Add-Button $f 'Cancel' 340 110 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::Cancel }) }
+    if ($f.ShowDialog($form) -ne 'OK' -or -not $nm.Text.Trim()) { return }
+    $argv = @('-u', (Join-Path $App 'profiles.py'), 'create', '--name', $nm.Text.Trim())
+    if ($copy.Checked) { $argv += @('--copy-from', [string]$pCombo.SelectedItem) }
+    $out = & $Py @argv 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg ("Could not create the profile: " + (($out -split "`n" | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1) -replace '^ERROR:\s*', '')); return }
+    Fill-ProfileList
+    Switch-Profile $nm.Text.Trim()
+    Fill-ProfileList
+}
+$b = Add-Button $form 'New...' 268 6 70
+$b.Add_Click({ Show-NewProfileDialog })
+$b = Add-Button $form 'Save as profile defaults' 344 6 175
+$b.Add_Click({ Save-ProfileDefaults; Log "New videos in '$([string]$pCombo.SelectedItem)' will start with these settings." })
+$b = Add-Button $form 'Export...' 525 6 80
+$b.Add_Click({
+    $d = New-Object System.Windows.Forms.SaveFileDialog
+    $d.Filter = 'Profile export|*.zip'; $d.FileName = ([string]$pCombo.SelectedItem) + '-profile.zip'
+    if ($d.ShowDialog() -eq 'OK') { Run-Py 'Export the profile (setup only, no footage or sign-ins)' 'profiles.py' @('export', '--name', [string]$pCombo.SelectedItem, '--out', $d.FileName) }
+})
+$b = Add-Button $form 'Import...' 611 6 80
+$b.Add_Click({
+    $f = Pick-File 'Profile export|*.zip|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
+    if ($f) { Run-Py 'Import a profile' 'profiles.py' @('import', '--file', $f) { Fill-ProfileList; Log 'Imported. Choose it in the Profile list to use it.' } }
+})
+$b = Add-Button $form 'Archive...' 697 6 85
+$b.Add_Click({
+    $others = @($pCombo.Items | Where-Object { [string]$_ -ne [string]$pCombo.SelectedItem })
+    if (-not $others) { Msg 'There is only one profile. Create another before archiving one.'; return }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Archive a profile'; $f.Size = New-Object System.Drawing.Size(460, 210); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $l = Add-Label $f 'Archived profiles leave the list and their folder moves to profiles\_archived. Nothing is deleted.' 15 12 420
+    $l.Size = New-Object System.Drawing.Size(420, 40)
+    $which = Add-Combo $f 15 60 250 ([string[]]$others)
+    $ok = Add-Button $f 'Archive' 240 115 90; $ok.DialogResult = 'OK'
+    $cancel = Add-Button $f 'Cancel' 340 115 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($f.ShowDialog($form) -ne 'OK') { return }
+    Run-Py "Archive profile '$([string]$which.SelectedItem)'" 'profiles.py' @('archive', '--name', [string]$which.SelectedItem) { Fill-ProfileList }
+})
+$cSimple = New-Object System.Windows.Forms.CheckBox
+$cSimple.Text = 'Simple mode'; $cSimple.Location = New-Object System.Drawing.Point(800, 8); $cSimple.Size = New-Object System.Drawing.Size(150, 24)
+$form.Controls.Add($cSimple)
+$SimpleTabs = @('Create', 'Edit recording', 'Highlights', 'Publish')
+function Apply-Mode([bool]$simple) {
+    $tabs.SuspendLayout()
+    $tabs.TabPages.Clear()
+    foreach ($page in $script:allPages) { if (-not $simple -or $SimpleTabs -contains $page.Text) { $tabs.TabPages.Add($page) } }
+    $tabs.ResumeLayout()
+    $tabs.SelectedIndex = 0
+}
+$cSimple.Add_CheckedChanged({
+    Apply-Mode $cSimple.Checked
+    if ($script:Smoke) { return }
+    try {
+        New-Item -ItemType Directory -Force -Path $Shared | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $Shared 'ui.json'), (@{ simple = [bool]$cSimple.Checked } | ConvertTo-Json))
+    } catch { }
+})
 
 # ---------------------------------------------------------------- job runner (non-blocking)
 # onDone callbacks run in script scope; pass values through $script:ctx (no closures needed)
@@ -578,20 +736,20 @@ function Run-Py([string]$label, [string]$script, [string[]]$argv, [scriptblock]$
 }
 
 $Guide = Join-Path $App 'guide.html'
-$btnGuide = Add-Button $form 'Guide' 465 484 105
+$btnGuide = Add-Button $form 'Guide' 465 518 105
 $btnGuide.Add_Click({
     if (Test-Path $Guide) { Start-Process $Guide } else { Msg "The guide is missing ($Guide). Re-run Setup-PodcastStudio.ps1." }
 })
-$btnStop = Add-Button $form 'Stop job' 580 484 110
+$btnStop = Add-Button $form 'Stop job' 580 518 110
 $btnStop.Add_Click({
     if ($script:proc -and -not $script:proc.HasExited) {
         & taskkill.exe /PID $script:proc.Id /T /F | Out-Null
         Log '--- stopped by user ---'
     }
 })
-$btnWs = Add-Button $form 'Open workspace' 700 484 125
+$btnWs = Add-Button $form 'Open workspace' 700 518 125
 $btnWs.Add_Click({ Start-Process explorer.exe $Work })
-$btnClaude = Add-Button $form 'Open Claude Code' 833 484 125
+$btnClaude = Add-Button $form 'Open Claude Code' 833 518 125
 $btnClaude.Add_Click({
     Start-Process powershell.exe -WorkingDirectory $Work -ArgumentList '-NoExit', '-Command', 'claude'
 })
@@ -1664,6 +1822,13 @@ $n4.Size = New-Object System.Drawing.Size(900, 40)
 # fal.ai is optional: move it to the end
 $tabs.TabPages.Remove($t3); $t3.Text = 'Cloud (optional)'; $tabs.TabPages.Add($t3)
 $tabs.SelectedIndex = 0
+$script:allPages = @($tabs.TabPages | ForEach-Object { $_ })
+Fill-ProfileList
+Apply-ProfileDefaults
+$uiFile = Join-Path $Shared 'ui.json'
+if ((Test-Path $uiFile) -and -not $script:Smoke) {
+    try { if (([System.IO.File]::ReadAllText($uiFile) | ConvertFrom-Json).simple) { $cSimple.Checked = $true } } catch { }
+}
 
 # ---------------------------------------------------------------- startup checks
 $form.Add_Shown({
@@ -1672,7 +1837,7 @@ $form.Add_Shown({
         if (Get-Command $tool -ErrorAction SilentlyContinue) { Log "  [ok] $tool" } else { Log "  [missing] $tool - re-run setup" }
     }
     if (Test-Path $Py) { Log '  [ok] python venv' } else { Log '  [missing] python venv - re-run setup' }
-    if (-not (Test-Path (Join-Path $Work 'connections.json'))) { Log '  [info] outside services are not connected (optional): Settings tab > Check all' }
+    if (-not (Test-Path (Join-Path $Shared 'connections.json'))) { Log '  [info] outside services are not connected (optional): Settings tab > Check all' }
     if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
@@ -1853,7 +2018,7 @@ Check 'recording tab and house rules' {
 }
 Check 'settings tab shows connection status' {
     Expect ($script:connRows.Count -eq 9) "expected 9 services, found $($script:connRows.Count)"
-    $f = Join-Path $Work 'connections.json'
+    $f = Join-Path $Shared 'connections.json'
     $had = Test-Path $f
     $keep = if ($had) { [System.IO.File]::ReadAllText($f) } else { '' }
     [System.IO.File]::WriteAllText($f, '{"services":{"vidiq":{"connected":true,"detail":"ok","checked":"2099-01-01 10:00"},"codex":{"connected":false,"detail":"no","checked":"2099-01-01 10:00"}},"folders":{}}')
@@ -1883,7 +2048,7 @@ Check 'services are off by default and save per project' {
     [void](Save-Services $false)
     $out = & $Py -u (Join-Path $App 'services.py') task --project $smokeDir --kind ideas 2>&1 | Out-String
     Expect ($LASTEXITCODE -ne 0 -and $out -match 'is off for this project') 'a task must refuse while its service is off'
-    $f = Join-Path $Work 'connections.json'
+    $f = Join-Path $Shared 'connections.json'
     if ($script:connFileBackup.had) { [System.IO.File]::WriteAllText($f, $script:connFileBackup.text) } else { Remove-Item $f -Force }
     Update-Connections
     'off by default, only connected services tickable, saved per project, rules reach the prompt, tasks refuse when off'
@@ -1895,6 +2060,28 @@ Check 'guide ships with the app' {
     Expect ($html -notmatch 'fonts\.googleapis') 'the guide must work offline'
     Expect ($btnGuide.Text -eq 'Guide') 'Guide button missing'
     "$([math]::Round($html.Length / 1024)) KB"
+}
+Check 'profiles and simple mode' {
+    Expect ($pCombo.Items.Count -ge 1 -and $pCombo.SelectedIndex -ge 0) 'the profile list is empty'
+    $keepWork = $Work
+    $tmpWork = Join-Path $smokeDir 'profile-smoke'
+    Set-Workspace $tmpWork
+    Expect ($Work -eq $tmpWork -and $env:PSTUDIO_WORKSPACE -eq $tmpWork -and $RulesFile -eq (Join-Path $tmpWork 'house-rules.md')) 'switching workspace did not reach every setting'
+    Expect (Test-Path (Join-Path $tmpWork 'projects')) 'profile folders were not created'
+    $cSecs.Text = '33'; $cFmt.SelectedItem = '1:1'; $cFrame.SelectedItem = 'Side by side'; $cBites.Checked = $false
+    Save-ProfileDefaults
+    $cSecs.Text = '45'; $cFmt.SelectedItem = '9:16'; $cFrame.SelectedIndex = 0; $cBites.Checked = $true
+    Apply-ProfileDefaults
+    Expect ($cSecs.Text -eq '33' -and [string]$cFmt.SelectedItem -eq '1:1' -and [string]$cFrame.SelectedItem -eq 'Side by side' -and -not $cBites.Checked) 'profile defaults did not round-trip'
+    Set-Workspace $keepWork
+    $cSecs.Text = '45'; $cFmt.SelectedItem = '9:16'; $cFrame.SelectedIndex = 0; $cBites.Checked = $true
+    $all = $tabs.TabPages.Count
+    $cSimple.Checked = $true
+    $simple = $tabs.TabPages.Count
+    $names = @($tabs.TabPages | ForEach-Object { $_.Text }) -join ', '
+    $cSimple.Checked = $false
+    Expect ($simple -eq 4 -and $tabs.TabPages.Count -eq $all) "simple mode shows $simple tabs ($names), then $($tabs.TabPages.Count) of $all"
+    "profile switch, defaults round-trip, simple mode $simple of $all tabs"
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'
@@ -2087,9 +2274,29 @@ def studio_root():
     return os.environ.get("PSTUDIO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def profiles_file():
+    return os.path.join(studio_root(), "profiles", "profiles.json")
+
+
+def workspace_dir():
+    """The folder of the profile in use: its projects, footage library, brand kit, style bible, voice samples and
+    settings. PSTUDIO_WORKSPACE (set by the app when you switch profile) wins; then profiles/profiles.json; then the
+    original single workspace folder, which becomes the first profile ("Main")."""
+    if os.environ.get("PSTUDIO_WORKSPACE"):
+        return os.environ["PSTUDIO_WORKSPACE"]
+    reg = read_json(profiles_file(), {}) or {}
+    folder = (reg.get("profiles") or {}).get(reg.get("current") or "")
+    return folder or os.path.join(studio_root(), "workspace")
+
+
+def shared_dir():
+    """Settings shared by every profile on this PC (connections to outside services)."""
+    return os.path.join(studio_root(), "shared")
+
+
 def settings():
-    """workspace/settings.json: user choices such as {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true}."""
-    data = read_json(os.path.join(studio_root(), "workspace", "settings.json"), {}) or {}
+    """The profile's settings.json: {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true, ...}."""
+    data = read_json(os.path.join(workspace_dir(), "settings.json"), {}) or {}
     return data if isinstance(data, dict) else {}
 
 
@@ -3071,7 +3278,7 @@ def footage_filter(src_w, src_h, W, H, layout):
 # ------------------------------------------------------------------ 1080p working copies of large footage
 def proxy_dir():
     from common import studio_root
-    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "workspace", "proxies")
+    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "shared", "proxies")
 
 
 def _proxy_path(src):
@@ -5717,7 +5924,7 @@ def main():
     ap.add_argument("action", choices=["prepare", "split", "join", "tighten", "render"])
     ap.add_argument("--recording")
     ap.add_argument("--slug")
-    ap.add_argument("--workspace", default=os.path.join(studio_root(), "workspace"))
+    ap.add_argument("--workspace", default=None, help="Profile folder (default: the profile in use)")
     ap.add_argument("--out")
     ap.add_argument("--whisper", default="small")
     ap.add_argument("--tighten", action="store_true", help="Remove pauses on this PC before handing over to Claude Code")
@@ -5725,6 +5932,9 @@ def main():
     ap.add_argument("--video", help="render: the input video")
     ap.add_argument("--keep", help="render: JSON list of [start, end] ranges to keep")
     a = ap.parse_args()
+    if not a.workspace:
+        from common import workspace_dir
+        a.workspace = workspace_dir()
     need = {"prepare": "recording", "split": "recording", "tighten": "recording", "join": "slug"}
     if a.action in need and not getattr(a, need[a.action]):
         fail(f"--{need[a.action]} is required for {a.action}.")
@@ -5952,7 +6162,8 @@ APP = os.path.dirname(os.path.abspath(__file__))
 
 
 def workspace():
-    return os.path.join(studio_root(), "workspace")
+    from common import workspace_dir
+    return workspace_dir()
 
 
 def defaults():
@@ -6271,11 +6482,20 @@ CONNECTOR_PAGE = "https://claude.ai/settings/connectors"
 
 
 def workspace():
-    return os.path.join(studio_root(), "workspace")
+    """The profile in use (YouTube sign-in is per profile, so each show can post to its own channel)."""
+    from common import workspace_dir
+    return workspace_dir()
 
 
 def path():
-    return os.path.join(workspace(), "connections.json")
+    """Connections are shared by every profile: they belong to your accounts, not to a show."""
+    from common import shared_dir
+    new = os.path.join(shared_dir(), "connections.json")
+    old = os.path.join(studio_root(), "workspace", "connections.json")
+    if not os.path.exists(new) and os.path.exists(old):      # carry over a check made before profiles existed
+        os.makedirs(shared_dir(), exist_ok=True)
+        shutil.copy2(old, new)
+    return new
 
 
 def load():
@@ -6286,8 +6506,9 @@ def load():
 
 
 def save(data):
-    os.makedirs(workspace(), exist_ok=True)
-    write_json(path(), data)
+    p = path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    write_json(p, data)
 
 
 def connected(service, data=None):
@@ -6627,6 +6848,271 @@ def main():
     ap.add_argument("--lib")
     a = ap.parse_args()
     import_session(os.path.abspath(a.folder), a.name.strip(), os.path.abspath(a.episodes), a.lib)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['profiles.py'] = @'
+"""Profiles: one per show or persona. Each keeps its own brand kit, style bible, house rules, voice sample,
+footage library, projects, YouTube sign-in and defaults for new videos. Connections to outside services are
+shared by all profiles.
+
+  python profiles.py list
+  python profiles.py create --name "Second Show" [--copy-from Main]   new profile (optionally copying a setup)
+  python profiles.py switch --name "Second Show"
+  python profiles.py export --name Main --out main-profile.zip         the setup only: no footage or videos
+  python profiles.py import --file main-profile.zip [--name "Main copy"]
+  python profiles.py archive --name "Old Show"                         set aside (moved, never deleted)
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import zipfile
+
+from common import fail, log, profiles_file, read_json, studio_root, write_json
+
+SETUP_FILES = ("brand.json", "style-bible.md", "house-rules.md", "settings.json", "profile.json")
+SETUP_DIRS = ("voice",)
+SUBFOLDERS = ("analysis", "voice", "scripts", "clips", "output", "frames", "projects", "library", "episodes",
+              "highlights", "music", "assets")
+NEVER_EXPORT = ("youtube_token.json", "youtube_client_secret.json")      # sign-ins stay on this PC
+
+
+def registry():
+    reg = read_json(profiles_file(), None)
+    if not isinstance(reg, dict) or not reg.get("profiles"):
+        legacy = os.path.join(studio_root(), "workspace")
+        reg = {"current": "Main", "profiles": {"Main": legacy}}
+    return reg
+
+
+def save_registry(reg):
+    os.makedirs(os.path.dirname(profiles_file()), exist_ok=True)
+    write_json(profiles_file(), reg)
+
+
+def folder(name):
+    reg = registry()
+    if name not in reg["profiles"]:
+        fail(f"There is no profile called '{name}'. Profiles: {', '.join(reg['profiles'])}")
+    return reg["profiles"][name]
+
+
+def check_name(name):
+    name = " ".join(str(name or "").split())
+    if not re.fullmatch(r"[\w][\w \-']{0,39}", name):
+        fail("Use 1-40 letters, digits, spaces, dashes or apostrophes for the profile name.")
+    if name.lower().startswith("_"):
+        fail("Profile names cannot start with an underscore.")
+    return name
+
+
+def _slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "profile"
+
+
+def _new_folder(name):
+    base = os.path.join(studio_root(), "profiles", _slug(name))
+    path, n = base, 2
+    while os.path.exists(path):
+        path, n = f"{base}-{n}", n + 1
+    for sub in SUBFOLDERS:
+        os.makedirs(os.path.join(path, sub), exist_ok=True)
+    app = os.path.dirname(os.path.abspath(__file__))      # the guide for Claude Code inside each profile
+    for guide in (os.path.join(app, "CLAUDE.workspace.md"), os.path.join(app, "CLAUDE.md"),
+                  os.path.join(studio_root(), "workspace", "CLAUDE.md")):
+        if os.path.exists(guide):
+            shutil.copy2(guide, os.path.join(path, "CLAUDE.md"))
+            break
+    return path
+
+
+def _localise_assets(dest):
+    """Copy the brand kit's logo and music into the profile's own assets folder and point brand.json at them,
+    so a profile never depends on files that belong to another profile."""
+    brand_path = os.path.join(dest, "brand.json")
+    brand = read_json(brand_path)
+    if not isinstance(brand, dict):
+        return
+    for key in ("logo", "music", "font_file"):
+        src = brand.get(key)
+        if src and os.path.exists(src) and os.path.dirname(os.path.abspath(src)) != os.path.join(dest, "assets"):
+            target = os.path.join(dest, "assets", os.path.basename(src))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(src, target)
+            brand[key] = target
+    write_json(brand_path, brand)
+
+
+def _copy_setup(src, dest):
+    for f in SETUP_FILES:
+        if os.path.exists(os.path.join(src, f)):
+            shutil.copy2(os.path.join(src, f), os.path.join(dest, f))
+    for d in SETUP_DIRS:
+        if os.path.isdir(os.path.join(src, d)):
+            shutil.copytree(os.path.join(src, d), os.path.join(dest, d), dirs_exist_ok=True)
+    _localise_assets(dest)
+
+
+def _stamp_profile(dest, name):
+    meta = read_json(os.path.join(dest, "profile.json"), {}) or {}
+    meta["name"] = name
+    meta.setdefault("defaults", {})
+    meta["created"] = meta.get("created") or datetime.date.today().isoformat()
+    write_json(os.path.join(dest, "profile.json"), meta)
+
+
+def create(name, copy_from=None, switch=True):
+    name = check_name(name)
+    reg = registry()
+    if name in reg["profiles"]:
+        fail(f"A profile called '{name}' already exists.")
+    dest = _new_folder(name)
+    if copy_from:
+        _copy_setup(folder(copy_from), dest)
+    _stamp_profile(dest, name)
+    reg["profiles"][name] = dest
+    if switch:
+        reg["current"] = name
+    save_registry(reg)
+    log(f"Created profile '{name}'" + (f" from '{copy_from}'" if copy_from else "") + f": {dest}")
+    log(f"PROFILE: {dest}")
+    return dest
+
+
+def switch(name):
+    reg = registry()
+    if name not in reg["profiles"]:
+        fail(f"There is no profile called '{name}'.")
+    path = reg["profiles"][name]
+    for sub in SUBFOLDERS:
+        os.makedirs(os.path.join(path, sub), exist_ok=True)
+    reg["current"] = name
+    save_registry(reg)
+    log(f"PROFILE: {path}")
+    return path
+
+
+def export(name, out):
+    """Zip the profile's setup: brand kit (with its logo and music), style bible, house rules, voice samples,
+    defaults and settings. Footage, videos and sign-ins are left out."""
+    src = folder(name)
+    out = os.path.abspath(out)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    brand = read_json(os.path.join(src, "brand.json"), {}) or {}
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("podcast-studio-profile.json", json.dumps({"name": name, "exported": datetime.date.today().isoformat(),
+                                                             "format": 1}))
+        for f in SETUP_FILES:
+            if f == "brand.json" and brand:
+                packed = dict(brand)
+                for key in ("logo", "music", "font_file"):
+                    if packed.get(key) and os.path.exists(packed[key]):
+                        z.write(packed[key], "assets/" + os.path.basename(packed[key]))
+                        packed[key] = "assets/" + os.path.basename(packed[key])
+                    elif packed.get(key):
+                        packed[key] = ""
+                z.writestr("brand.json", json.dumps(packed, indent=2))
+            elif os.path.exists(os.path.join(src, f)) and f not in NEVER_EXPORT:
+                z.write(os.path.join(src, f), f)
+        for d in SETUP_DIRS:
+            for root, _, files in os.walk(os.path.join(src, d)):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    z.write(full, os.path.relpath(full, src).replace(os.sep, "/"))
+    log(f"Exported '{name}' to {out} ({os.path.getsize(out) // 1024} KB)")
+    log(f"EXPORTED: {out}")
+    return out
+
+
+def import_(path, name=None):
+    if not zipfile.is_zipfile(path):
+        fail("That file is not a profile export (.zip).")
+    with zipfile.ZipFile(path) as z:
+        if "podcast-studio-profile.json" not in z.namelist():
+            fail("That zip is not a Podcast Studio profile export.")
+        meta = json.loads(z.read("podcast-studio-profile.json"))
+        name = check_name(name or meta.get("name") or "Imported")
+        reg = registry()
+        base, n = name, 2
+        while name in reg["profiles"]:
+            name, n = f"{base} ({n})", n + 1
+        dest = _new_folder(name)
+        for member in z.namelist():
+            target = os.path.abspath(os.path.join(dest, member))
+            if not target.startswith(os.path.abspath(dest) + os.sep):     # refuse paths that climb out of the folder
+                fail(f"Unsafe path in the export: {member}")
+            if member.endswith("/") or member == "podcast-studio-profile.json" or os.path.basename(member) in NEVER_EXPORT:
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(member) as srcf, open(target, "wb") as dst:
+                shutil.copyfileobj(srcf, dst)
+    brand_path = os.path.join(dest, "brand.json")
+    brand = read_json(brand_path)
+    if isinstance(brand, dict):
+        for key in ("logo", "music", "font_file"):
+            if str(brand.get(key) or "").startswith("assets/"):
+                brand[key] = os.path.join(dest, *brand[key].split("/"))
+        write_json(brand_path, brand)
+    _stamp_profile(dest, name)
+    reg["profiles"][name] = dest
+    save_registry(reg)
+    log(f"Imported profile '{name}': {dest}")
+    log(f"PROFILE: {dest}")
+    return name
+
+
+def archive(name):
+    """Set a profile aside: it disappears from the list and its folder moves to profiles/_archived. Nothing is deleted."""
+    reg = registry()
+    if name not in reg["profiles"]:
+        fail(f"There is no profile called '{name}'.")
+    if reg["current"] == name:
+        fail("Switch to another profile before archiving this one.")
+    if len(reg["profiles"]) == 1:
+        fail("The last profile cannot be archived.")
+    path = reg["profiles"].pop(name)
+    profiles_root = os.path.join(studio_root(), "profiles")
+    if os.path.abspath(path).startswith(os.path.abspath(profiles_root) + os.sep) and os.path.isdir(path):
+        dest = os.path.join(profiles_root, "_archived", f"{os.path.basename(path)}-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(path, dest)
+        log(f"Archived '{name}' to {dest}")
+    else:
+        log(f"Removed '{name}' from the list; its folder was left where it is: {path}")
+    save_registry(reg)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["list", "create", "switch", "export", "import", "archive"])
+    ap.add_argument("--name")
+    ap.add_argument("--copy-from")
+    ap.add_argument("--out")
+    ap.add_argument("--file")
+    a = ap.parse_args()
+    if a.action == "list":
+        reg = registry()
+        for n, p in reg["profiles"].items():
+            log(f"{'*' if n == reg['current'] else ' '} {n}: {p}")
+    elif a.action == "create":
+        create(a.name, a.copy_from)
+    elif a.action == "switch":
+        switch(a.name)
+    elif a.action == "export":
+        if not (a.name and a.out):
+            fail("export needs --name and --out")
+        export(a.name, a.out)
+    elif a.action == "import":
+        if not a.file:
+            fail("import needs --file")
+        import_(a.file, a.name)
+    else:
+        archive(a.name)
 
 
 if __name__ == "__main__":
@@ -7001,7 +7487,8 @@ def main():
         check("LLM JSON reply", llm_test(a.model))
         voice = a.voice
         if not voice:
-            vdir = os.path.join(a.root, "workspace", "voice")
+            from common import workspace_dir
+            vdir = os.path.join(workspace_dir(), "voice")
             wavs = [os.path.join(vdir, f) for f in os.listdir(vdir)] if os.path.isdir(vdir) else []
             voice = next((w for w in wavs if w.lower().endswith(".wav")), None)
         if voice:
@@ -7026,6 +7513,9 @@ if __name__ == "__main__":
 '@
 $files['CLAUDE.md'] = @'
 # Podcast Studio workspace
+
+This folder is one **profile** (a show or persona). Its brand kit, style bible, house rules, voice samples,
+library and projects belong to this show only; other profiles live in other folders.
 
 Local pipeline that turns a prompt into a short video in the podcast's style.
 Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
@@ -7385,6 +7875,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
       <li><a href="#uc-voice">Voiceover only</a></li>
       <li><a href="#uc-assemble">Join clips by hand</a></li>
       <li><a href="#uc-rules">Make a correction stick</a></li>
+      <li><a href="#uc-profiles">Set up a show (profile)</a></li>
+      <li><a href="#uc-simple">Simple mode</a></li>
       <li><a href="#uc-connect">Connect a service</a></li>
       <li><a href="#uc-riverside">Import a Riverside session</a></li>
       <li><a href="#uc-services">Switch on a service</a></li>
@@ -7404,6 +7896,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
           <li><b>Create</b> tab: press <b>Brand kit...</b>, set colours, font, logo and music bed, then <b>Save</b>.</li>
           <li><b>Analyze</b> tab: press <b>Compare local models</b>. The best one becomes the default.</li>
           <li><b>Create</b> tab: press <b>Full self-test</b> and keep <span class="path">logs\selftest.json</span>.</li>
+          <li>Press <b>Save as profile defaults</b> at the top so every new video starts with this setup.</li>
         </ol>
         <p class="aside">Indexing transcribes every episode, so it takes a few minutes per 45-minute episode. You only repeat it when you add episodes.</p>
       </article>
@@ -7567,6 +8060,30 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
           <li>To review or delete rules, go to <b>Edit recording</b> and press <b>House rules</b>.</li>
         </ol>
         <p class="aside">Every later script, edit and social post follows these rules.</p>
+      </article>
+
+      <article class="case" id="uc-profiles">
+        <span class="where">Profile bar · top of the window</span>
+        <h3>Set up a show or persona once, reuse it forever</h3>
+        <ol>
+          <li>Press <b>New...</b> next to <b>Profile</b>, type the show's name, and tick <b>Copy the setup</b> to start from the current one.</li>
+          <li>Set it up as in <b>Set up the studio</b>: voice sample, episode folder and <b>Index footage</b>, style bible, <b>Brand kit...</b>, house rules.</li>
+          <li>In the <b>Create</b> tab, choose the length, shape, framing, model and options this show usually uses.</li>
+          <li>Press <b>Save as profile defaults</b>. Every new video in this profile starts with those settings.</li>
+          <li>Next time, choose the show in the <b>Profile</b> list. Its look, voice, footage, projects and YouTube sign-in come back at once.</li>
+          <li>To back it up or move it to another PC, press <b>Export...</b>; on the other PC press <b>Import...</b> and choose the file.</li>
+        </ol>
+        <p class="aside">An export holds the setup only: no footage, videos or sign-ins. Connections in the Settings tab are shared by every profile, except YouTube, which each profile signs in to separately. <b>Archive...</b> sets a profile aside without deleting it.</p>
+      </article>
+
+      <article class="case" id="uc-simple">
+        <span class="where">Top right of the window</span>
+        <h3>Simple mode</h3>
+        <ol>
+          <li>Tick <b>Simple mode</b> to show only <b>Create</b>, <b>Edit recording</b>, <b>Highlights</b> and <b>Publish</b>.</li>
+          <li>Untick it when you need setup tabs such as <b>Voice clone</b>, <b>Analyze</b>, <b>Settings</b> or <b>Services</b>.</li>
+        </ol>
+        <p class="aside">The app remembers your choice. Nothing is lost while tabs are hidden.</p>
       </article>
 
       <article class="case" id="uc-connect">
@@ -10367,6 +10884,9 @@ foreach ($name in $binaries.Keys) {
     Ok $name
 }
 foreach ($name in $files.Keys) {
+    if ($name -eq 'CLAUDE.md') {   # also kept in the app folder: every new profile gets a copy
+        [System.IO.File]::WriteAllText((Join-Path $appDir 'CLAUDE.workspace.md'), $files[$name], (New-Object System.Text.UTF8Encoding($true)))
+    }
     $target = if ($name -eq 'CLAUDE.md') { Join-Path $Root 'workspace\CLAUDE.md' } else { Join-Path $appDir $name }
     if ($name -eq 'CLAUDE.md' -and (Test-Path $target)) { Ok 'workspace\CLAUDE.md kept (already exists)'; continue }
     [System.IO.File]::WriteAllText($target, $files[$name], (New-Object System.Text.UTF8Encoding($true)))
