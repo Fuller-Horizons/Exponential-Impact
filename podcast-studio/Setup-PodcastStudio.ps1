@@ -484,7 +484,7 @@ $log.Anchor = 'Top,Bottom,Left,Right'
 $form.Controls.Add($log)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Location = New-Object System.Drawing.Point(8, 488); $status.Size = New-Object System.Drawing.Size(560, 24)
+$status.Location = New-Object System.Drawing.Point(8, 488); $status.Size = New-Object System.Drawing.Size(450, 24)
 $status.Text = 'Ready.'
 $form.Controls.Add($status)
 
@@ -577,6 +577,11 @@ function Run-Py([string]$label, [string]$script, [string[]]$argv, [scriptblock]$
     Start-Job2 $label $Py (@('-u', (Join-Path $App $script)) + $argv) $onDone
 }
 
+$Guide = Join-Path $App 'guide.html'
+$btnGuide = Add-Button $form 'Guide' 465 484 105
+$btnGuide.Add_Click({
+    if (Test-Path $Guide) { Start-Process $Guide } else { Msg "The guide is missing ($Guide). Re-run Setup-PodcastStudio.ps1." }
+})
 $btnStop = Add-Button $form 'Stop job' 580 484 110
 $btnStop.Add_Click({
     if ($script:proc -and -not $script:proc.HasExited) {
@@ -1882,6 +1887,14 @@ Check 'services are off by default and save per project' {
     if ($script:connFileBackup.had) { [System.IO.File]::WriteAllText($f, $script:connFileBackup.text) } else { Remove-Item $f -Force }
     Update-Connections
     'off by default, only connected services tickable, saved per project, rules reach the prompt, tasks refuse when off'
+}
+Check 'guide ships with the app' {
+    Expect (Test-Path $Guide) "guide.html is missing from $App"
+    $html = [System.IO.File]::ReadAllText($Guide)
+    Expect ($html -match '<!doctype html>' -and $html -match '<title>Podcast Studio Guide</title>') 'guide.html is not a complete page'
+    Expect ($html -notmatch 'fonts\.googleapis') 'the guide must work offline'
+    Expect ($btnGuide.Text -eq 'Guide') 'Guide button missing'
+    "$([math]::Round($html.Length / 1024)) KB"
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'
@@ -7082,6 +7095,684 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - If two faces cannot be found for a two-host framing, typical seat positions (27% and 73% of the width) are assumed.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.
 '@
+$files['guide.html'] = @'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Podcast Studio Guide</title>
+<!-- Generated from guide/guide.html by build.py; edit that file, not this one. -->
+<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<style>
+/* Layout: a production sheet. Left-aligned bands; the 9:16 output frame is the one illustrated object. */
+:root {
+  --bg: #F2F4F7; --surface: #FFFFFF; --ink: #14202B; --muted: #55626F; --line: #D5DBE2;
+  --accent: #8A5A00; --gold: #FFD23F; --on-gold: #1A1400;
+  --teal: #0F766E; --teal-soft: #DDF1EE;
+  --video-bg: #101826; --video-ink: #FFFFFF; --video-dim: #8FA0B5;
+  --display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --body: "Inter", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F151C; --surface: #18212B; --ink: #E8EDF2; --muted: #9AA7B4; --line: #2B3744;
+    --accent: #FFD23F; --gold: #FFD23F; --on-gold: #1A1400;
+    --teal: #5EDCCB; --teal-soft: #14332F;
+    --video-bg: #05090F; --video-ink: #FFFFFF; --video-dim: #8FA0B5;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F151C; --surface: #18212B; --ink: #E8EDF2; --muted: #9AA7B4; --line: #2B3744;
+  --accent: #FFD23F; --gold: #FFD23F; --on-gold: #1A1400;
+  --teal: #5EDCCB; --teal-soft: #14332F;
+  --video-bg: #05090F; --video-ink: #FFFFFF; --video-dim: #8FA0B5;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.55; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 56px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.4rem, 3.4vw, 1.9rem); font-weight: 600; }
+h3 { font-size: 1.05rem; font-weight: 600; }
+p { margin: 0; }
+.eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--teal); font-weight: 600; }
+.muted { color: var(--muted); }
+code, .path { font-family: var(--mono); font-size: 0.86em; overflow-wrap: anywhere; }
+section { display: flex; flex-direction: column; gap: 20px; }
+.lede { max-width: 62ch; font-size: 1.08rem; color: var(--muted); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: center; }
+.hero-text { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; margin: 4px 0 0; }
+.facts li { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 0.85rem; background: var(--surface); }
+.phone { width: 198px; max-width: 100%; aspect-ratio: 9 / 16; background: var(--video-bg); border-radius: 18px; position: relative; overflow: hidden;
+  border: 1px solid var(--line); color: var(--video-ink); font-family: var(--display); }
+.phone .tc { position: absolute; top: 10px; left: 12px; font-family: var(--mono); font-size: 0.62rem; color: var(--video-dim); }
+.phone .logo { position: absolute; top: 10px; right: 12px; font-family: var(--mono); font-size: 0.58rem; border: 1px dashed var(--video-dim); color: var(--video-dim); padding: 2px 6px; border-radius: 4px; }
+.phone .half { position: absolute; left: 0; right: 0; height: 34%; display: grid; place-items: center; font-family: var(--mono); font-size: 0.62rem; color: var(--video-dim); border-bottom: 1px dashed var(--video-dim); }
+.phone .half.a { top: 9%; } .phone .half.b { top: 43%; border-bottom: 0; }
+.phone .cap { position: absolute; left: 8%; right: 8%; bottom: 13%; text-align: center; font-weight: 700; font-size: 0.98rem; line-height: 1.2; }
+.phone .cap b { color: var(--gold); font-weight: 700; }
+.phone .spec { position: absolute; bottom: 8px; left: 0; right: 0; text-align: center; font-family: var(--mono); font-size: 0.58rem; color: var(--video-dim); }
+
+/* in / out */
+.io { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 20px; align-items: stretch; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.panel ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.panel li { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); gap: 12px; font-size: 0.93rem; }
+.panel li > :first-child { font-weight: 600; }
+.arrow { align-self: center; font-family: var(--display); font-size: 1.6rem; color: var(--teal); }
+.tag { display: inline-block; font-family: var(--mono); font-size: 0.68rem; padding: 1px 6px; border-radius: 4px; background: var(--teal-soft); color: var(--teal); margin-left: 6px; vertical-align: 1px; }
+
+/* pipeline */
+.stages { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--line); gap: 1px; }
+.stages li { background: var(--surface); padding: 20px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.stages .n { font-family: var(--mono); font-size: 0.75rem; color: var(--accent); font-weight: 600; }
+.stages .meta { margin-top: auto; padding-top: 8px; font-size: 0.82rem; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.stages .meta span b { color: var(--ink); font-weight: 600; }
+
+/* scene kinds */
+.kinds { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.kind { border-top: 3px solid var(--gold); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.kind p { font-size: 0.93rem; color: var(--muted); }
+
+/* how to use */
+.use { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 32px; }
+.use ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: 10px; }
+.use li { padding-left: 4px; }
+.use li b { font-weight: 600; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 24px; margin: 0; }
+.tabs div { display: flex; flex-direction: column; gap: 2px; }
+.tabs dt { font-weight: 600; } .tabs dd { margin: 0; color: var(--muted); font-size: 0.93rem; }
+
+/* use cases */
+.jump { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.jump a { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 5px 13px; font-size: 0.88rem;
+  background: var(--surface); color: var(--ink); text-decoration: none; }
+.jump a:hover, .jump a:focus-visible { border-color: var(--teal); color: var(--teal); }
+.cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.case { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; scroll-margin-top: 16px; }
+.case .where { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.case ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 7px; font-size: 0.94rem; }
+.case li { padding-left: 2px; }
+.case b { font-weight: 600; }
+.case .aside { font-size: 0.86rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+
+/* notice */
+.notice { border: 1px solid var(--line); border-left: 4px solid var(--gold); background: var(--surface); padding: 16px 20px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px; max-width: 78ch; }
+
+/* checklist */
+.check-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
+.progress { display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.bar { width: 160px; max-width: 40vw; height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--teal); transition: width 0.2s; }
+button { font: inherit; font-size: 0.85rem; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button:hover { border-color: var(--teal); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.group { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.group .gh { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.group .count { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.items label { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; padding: 8px 6px; border-radius: 6px; cursor: pointer; align-items: start; }
+.items label:hover { background: var(--bg); }
+.items input { width: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--teal); }
+.items .t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.items .t small { color: var(--muted); font-size: 0.86rem; }
+.items input:checked + .t > span { color: var(--muted); text-decoration: line-through; }
+.cmd { display: flex; gap: 8px; align-items: stretch; margin: 4px 0 4px 38px; }
+.cmd pre { margin: 0; flex: 1; min-width: 0; overflow-x: auto; background: var(--video-bg); color: var(--video-ink); padding: 10px 12px; border-radius: 6px; font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; }
+.cmd button { flex: none; align-self: flex-start; }
+.fix { margin: 0; display: grid; gap: 10px; }
+.fix div { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 16px; font-size: 0.93rem; }
+.fix dt { font-weight: 600; } .fix dd { margin: 0; color: var(--muted); }
+
+@media (max-width: 720px) {
+  .hero { grid-template-columns: minmax(0, 1fr); }
+  .phone { justify-self: start; }
+  .io { grid-template-columns: minmax(0, 1fr); }
+  .arrow { transform: rotate(90deg); justify-self: start; margin-left: 20px; }
+  .panel li, .fix div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .cmd { margin-left: 0; flex-direction: column; }
+}
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-text">
+      <span class="eyebrow">Runs on your PC · Claude Code only when you ask it to edit</span>
+      <h1>Podcast Studio</h1>
+      <p class="lede">Type a topic. The app drafts an outline, writes a script, narrates it in your cloned voice, pulls matching moments from your own episodes, and renders a captioned short video.</p>
+      <ul class="facts">
+        <li>Windows 10 / 11</li><li>4 GB NVIDIA GPU</li><li>16 GB RAM</li><li>About 25 GB disk</li>
+      </ul>
+    </div>
+    <div class="phone" role="img" aria-label="Diagram of a finished vertical video: two hosts stacked, a logo in the corner and a caption with highlighted words">
+      <span class="tc">00:00:07.2</span><span class="logo">LOGO</span>
+      <div class="half a">host 1 · episode footage</div>
+      <div class="half b">host 2 · episode footage</div>
+      <div class="cap"><b>You run out of</b> cash, not ideas.</div>
+      <span class="spec">1080 × 1920 · −14 LUFS</span>
+    </div>
+  </header>
+
+  <section>
+    <span class="eyebrow">What goes in, what comes out</span>
+    <h2>Inputs and outputs</h2>
+    <div class="io">
+      <div class="panel">
+        <h3>You give it</h3>
+        <ul>
+          <li><span>A topic</span><span class="muted">One or two sentences about what the video should say.</span></li>
+          <li><span>Length and shape</span><span class="muted">Seconds (45 by default) and 9:16, 16:9 or 1:1.</span></li>
+          <li><span>A voice sample</span><span class="muted">8 to 15 seconds of clean speech, cut from an episode in the Voice clone tab.</span></li>
+          <li><span>Your episodes</span><span class="muted">A folder of episode videos, indexed once so the app can search what was said.</span></li>
+          <li><span>Framing</span><span class="muted">How hosts appear: Auto, Stacked, Side by side, Both in frame, One person, Left person, Right person, or Active speaker (cuts to whoever is talking).</span></li>
+          <li><span>Style bible <span class="tag">optional</span></span><span class="muted">Built from your episodes. Steers hooks, tone and pacing.</span></li>
+          <li><span>Brand kit <span class="tag">optional</span></span><span class="muted">Colours, font, caption highlight and a corner logo.</span></li>
+        </ul>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="panel">
+        <h3>You get back</h3>
+        <ul>
+          <li><span class="path">final.mp4</span><span class="muted">The finished video with burned-in captions and normalised sound.</span></li>
+          <li><span class="path">outline.txt</span><span class="muted">The outline you approved, plus three hook options in <span class="path">hooks.json</span>.</span></li>
+          <li><span class="path">script.json</span><span class="muted">Every scene: narration, scene type and the footage it uses.</span></li>
+          <li><span class="path">captions.ass</span><span class="muted">Word-by-word caption timing.</span></li>
+          <li><span class="path">qa.json</span><span class="muted">The quality report: pass, warning or fail for each check.</span></li>
+          <li><span class="path">metrics.json</span><span class="muted">Time per stage and peak graphics memory.</span></li>
+        </ul>
+        <p class="muted" style="font-size:0.86rem">All in <span class="path">PodcastStudio\workspace\projects\&lt;project name&gt;\</span></p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Inside one run</span>
+    <h2>How a video gets made</h2>
+    <p class="lede">Six stages run in order. Each one saves its work, so a run that stops can pick up where it left off.</p>
+    <ol class="stages">
+      <li><span class="n">STAGE 1</span><h3>Outline</h3><p>A language model on your PC drafts a title, three hooks, the beats and a closing line. You pick a hook, edit freely, then approve.</p>
+        <div class="meta"><span><b>Uses</b> Ollama (local model)</span><span><b>Saves</b> <span class="path">outline.txt, hooks.json</span></span></div></li>
+      <li><span class="n">STAGE 2</span><h3>Script and shot list</h3><p>The outline becomes spoken narration split into scenes. Each scene is given a type and, for footage, a real moment from your episodes.</p>
+        <div class="meta"><span><b>Uses</b> Ollama + footage search</span><span><b>Saves</b> <span class="path">script.json</span></span></div></li>
+      <li><span class="n">STAGE 3</span><h3>Voice</h3><p>Each narrated scene is spoken in your cloned voice. The app listens back to every line and re-makes any that came out garbled.</p>
+        <div class="meta"><span><b>Uses</b> Qwen3-TTS on the GPU</span><span><b>Saves</b> <span class="path">voice\scene_01.wav …</span></span></div></li>
+      <li><span class="n">STAGE 4</span><h3>Visuals</h3><p>One clip per scene, cut to the exact length of its voice line. Footage is cropped around the speaker's face.</p>
+        <div class="meta"><span><b>Uses</b> ffmpeg, face detection</span><span><b>Saves</b> <span class="path">visuals\scene_01.mp4 …</span></span></div></li>
+      <li><span class="n">STAGE 5</span><h3>Render</h3><p>Scenes are joined. Captions highlight each word as it is spoken, loudness is set to −14 LUFS, and the logo is added.</p>
+        <div class="meta"><span><b>Uses</b> ffmpeg on the CPU</span><span><b>Saves</b> <span class="path">final.mp4, captions.ass</span></span></div></li>
+      <li><span class="n">STAGE 6</span><h3>Quality gate</h3><p>Checks length, resolution, loudness, black frames, long silences, caption coverage, and that the voice matches the script.</p>
+        <div class="meta"><span><b>Uses</b> ffmpeg, speech-to-text</span><span><b>Saves</b> <span class="path">qa.json</span></span></div></li>
+    </ol>
+  </section>
+
+  <section>
+    <span class="eyebrow">What you see on screen</span>
+    <h2>Four kinds of scene</h2>
+    <div class="kinds">
+      <div class="kind"><h3>Soundbite</h3><p>A real clip of the hosts, played with its own sound. Up to two per video.</p></div>
+      <div class="kind"><h3>Footage</h3><p>Silent episode footage under the narration, framed the way you choose: stacked, side by side, both in frame, or one person.</p></div>
+      <div class="kind"><h3>Card</h3><p>Bold text on screen in your brand colours, with a slow zoom.</p></div>
+      <div class="kind"><h3>Still <span class="tag">optional</span></h3><p>A generated image with a slow zoom. Off unless you tick AI stills.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Instructions</span>
+    <h2>At a glance</h2>
+    <div class="use">
+      <div class="col">
+        <h3>Once, after installing</h3>
+        <ol>
+          <li><b>Voice clone tab.</b> Paste an episode link or pick a file, set a start time, and press Extract sample.</li>
+          <li><b>Create tab.</b> Choose your episode folder and press Index footage.</li>
+          <li><b>Analyze tab.</b> Press Build style bible (local).</li>
+          <li><b>Create tab.</b> Press Brand kit and set colours, font and logo.</li>
+        </ol>
+      </div>
+      <div class="col">
+        <h3>For every video</h3>
+        <ol>
+          <li>Name the project, set the length, shape and framing, and type the topic.</li>
+          <li>Press <b>1. Draft outline</b>. Pick a hook and edit the outline.</li>
+          <li>Press <b>2. Approve + make video</b>. The finished file opens in its folder.</li>
+          <li>Open the <b>Scenes tab</b> to change or re-make a single scene, then press Apply changes + re-make video.</li>
+        </ol>
+      </div>
+    </div>
+    <dl class="tabs">
+      <div><dt>Create</dt><dd>Topic to finished video, self-test, brand kit.</dd></div>
+      <div><dt>Edit recording</dt><dd>Hybrid. Prepares a raw recording here, then Claude Code edits it with the Herk Edit Kit.</dd></div>
+      <div><dt>Scenes</dt><dd>Edit, re-make, add or delete one scene. Add house rules.</dd></div>
+      <div><dt>Highlights</dt><dd>Finds the best moments in an episode and cuts them into finished clips.</dd></div>
+      <div><dt>Publish</dt><dd>Drafts a title, description and social posts; uploads to YouTube when you confirm.</dd></div>
+      <div><dt>Analyze</dt><dd>Transcripts, frames and the style bible.</dd></div>
+      <div><dt>Voice clone</dt><dd>Make the voice sample; speak any text.</dd></div>
+      <div><dt>Assemble</dt><dd>Join clips by hand with music and captions.</dd></div>
+      <div><dt>Services</dt><dd>Optional. Switch Higgsfield, vidIQ and Google Drive on per project, with credit caps.</dd></div>
+      <div><dt>Settings</dt><dd>Connect, disconnect and check each outside service once; import Riverside sessions.</dd></div>
+      <div><dt>Cloud video</dt><dd>Optional. Sends clips to fal.ai and costs money.</dd></div>
+    </dl>
+  </section>
+
+  <section id="steps">
+    <span class="eyebrow">Step by step</span>
+    <h2>What do you want to do?</h2>
+    <p class="lede">Button and box names are written exactly as they appear in the app.</p>
+    <ul class="jump">
+      <li><a href="#uc-setup">Set up once</a></li>
+      <li><a href="#uc-new-video">Make a video from a topic</a></li>
+      <li><a href="#uc-scene">Fix one scene</a></li>
+      <li><a href="#uc-clips">Turn an episode into clips</a></li>
+      <li><a href="#uc-recording">Edit a raw recording</a></li>
+      <li><a href="#uc-long">Edit a long recording</a></li>
+      <li><a href="#uc-trim">Trim dead air</a></li>
+      <li><a href="#uc-social">Write social posts</a></li>
+      <li><a href="#uc-youtube">Publish to YouTube</a></li>
+      <li><a href="#uc-import">Import from YouTube</a></li>
+      <li><a href="#uc-voice">Voiceover only</a></li>
+      <li><a href="#uc-assemble">Join clips by hand</a></li>
+      <li><a href="#uc-rules">Make a correction stick</a></li>
+      <li><a href="#uc-connect">Connect a service</a></li>
+      <li><a href="#uc-riverside">Import a Riverside session</a></li>
+      <li><a href="#uc-services">Switch on a service</a></li>
+      <li><a href="#uc-service-tasks">Use vidIQ or Higgsfield</a></li>
+      <li><a href="#uc-codex">Edit with Codex</a></li>
+    </ul>
+
+    <div class="cases">
+      <article class="case" id="uc-setup">
+        <span class="where">Once, after installing</span>
+        <h3>Set up the studio</h3>
+        <ol>
+          <li>Open <b>Podcast Studio</b> from the desktop shortcut.</li>
+          <li><b>Voice clone</b> tab: paste an episode link or press <b>Browse...</b>, set <b>Start (MM:SS)</b> and 8 to 15 <b>Seconds</b>, then press <b>Extract sample</b>. Press <b>Play sample</b> to check it.</li>
+          <li><b>Create</b> tab: next to <b>Episode folder</b> press <b>Browse...</b>, choose the folder of episode videos, then press <b>Index footage</b>.</li>
+          <li><b>Analyze</b> tab: press <b>Build style bible (local)</b>.</li>
+          <li><b>Create</b> tab: press <b>Brand kit...</b>, set colours, font, logo and music bed, then <b>Save</b>.</li>
+          <li><b>Analyze</b> tab: press <b>Compare local models</b>. The best one becomes the default.</li>
+          <li><b>Create</b> tab: press <b>Full self-test</b> and keep <span class="path">logs\selftest.json</span>.</li>
+        </ol>
+        <p class="aside">Indexing transcribes every episode, so it takes a few minutes per 45-minute episode. You only repeat it when you add episodes.</p>
+      </article>
+
+      <article class="case" id="uc-new-video">
+        <span class="where">Create tab</span>
+        <h3>Make a video from a topic</h3>
+        <ol>
+          <li>Fill in <b>Project name</b>, <b>Length (s)</b>, <b>Format</b> and <b>Framing</b>.</li>
+          <li>Type what the video is about in <b>Video topic / prompt</b>.</li>
+          <li>Check that <b>Voice sample WAV</b> points to your voice sample.</li>
+          <li>Press <b>1. Draft outline</b> and wait for the outline to appear.</li>
+          <li>Choose an opening line in <b>Hook (pick one)</b>, then edit the outline as you like.</li>
+          <li>Tick or untick <b>Soundbites</b>, <b>AI stills</b> and <b>Lip-sync</b>.</li>
+          <li>Press <b>2. Approve + make video</b>. When it finishes, the folder opens on <span class="path">final.mp4</span>.</li>
+          <li><b>Scenes</b> tab: press <b>Quality report</b> and read any warnings.</li>
+        </ol>
+        <p class="aside">If a stage fails, press <b>2. Approve + make video</b> again. Finished work is kept.</p>
+      </article>
+
+      <article class="case" id="uc-scene">
+        <span class="where">Scenes tab</span>
+        <h3>Fix one scene</h3>
+        <ol>
+          <li>Make sure the <b>Create</b> tab shows the right <b>Project name</b>.</li>
+          <li>Press <b>Load scenes</b> and click the scene in the list.</li>
+          <li>Change <b>Type</b>, <b>Framing</b>, <b>Narration</b>, <b>Search words</b> or <b>Card text</b>.</li>
+          <li>Press <b>Save scene</b>.</li>
+          <li>Press <b>Apply changes + re-make video</b>. Only what you changed is rebuilt.</li>
+          <li>Press <b>Play video</b> to check the result.</li>
+        </ol>
+        <p class="aside"><b>Re-make this scene</b> gives a new voice take and the next best footage without editing anything. <b>Add after</b> and <b>Delete</b> add or remove a scene.</p>
+      </article>
+
+      <article class="case" id="uc-clips">
+        <span class="where">Highlights tab</span>
+        <h3>Turn an episode into clips</h3>
+        <ol>
+          <li>The episode must already be in the footage index (see Set up the studio).</li>
+          <li>Next to <b>Episode video</b> press <b>Browse...</b> and choose the episode file.</li>
+          <li>Set <b>Clips to make</b>, <b>Shortest (s)</b>, <b>Longest (s)</b> and <b>Shape</b>.</li>
+          <li>Leave <b>Framing</b> on <b>Active speaker</b> to cut to whoever is talking. Untick <b>Headline</b> if you don't want a title on screen.</li>
+          <li>Press <b>Find highlights + make clips</b>.</li>
+          <li>Click a row and press <b>Play selected</b>, or press <b>Open clips folder</b>.</li>
+        </ol>
+        <p class="aside">Clips use the hosts' own voices. Nothing is narrated or cloned.</p>
+      </article>
+
+      <article class="case" id="uc-recording">
+        <span class="where">Edit recording tab · hybrid</span>
+        <h3>Edit a raw recording with Claude Code</h3>
+        <ol>
+          <li>Next to <b>Raw recording</b> press <b>Browse...</b> and choose your take. <b>Project name</b> fills in.</li>
+          <li>Set <b>Type</b> to <b>Short (reel or Short)</b> or <b>Long video</b>. Leave <b>Remove pauses here first</b> ticked.</li>
+          <li>Press <b>1. Prepare (transcribe here)</b>. Your PC copies and transcribes the recording and removes the pauses.</li>
+          <li>Read the box labelled <b>What Claude Code will be asked</b> and change it if you want.</li>
+          <li>Leave <b>Editor</b> on <b>Claude Code</b> and press <b>2. Edit with the editor</b>. A new window opens.</li>
+          <li>In that window, answer Claude's questions and approve the planned cuts before it renders.</li>
+          <li>Give notes in plain words. Ask it to save a note as a house rule to make it permanent.</li>
+          <li>Press <b>Open project folder</b> and look in <span class="path">renders</span> for the finished video.</li>
+        </ol>
+        <p class="aside">Claude Code is a cloud model and uses your Claude subscription. The transcript and editing decisions go to Claude; the video files stay on your PC. Run <code>claude</code> once in PowerShell to sign in.</p>
+      </article>
+
+      <article class="case" id="uc-long">
+        <span class="where">Edit recording tab · hybrid</span>
+        <h3>Edit a long recording (over about 15 minutes)</h3>
+        <ol>
+          <li>Next to <b>Raw recording</b> press <b>Browse...</b> and choose the recording. <b>Project name</b> fills in, for example <b>my-talk</b>.</li>
+          <li>Set the length of each part in the box after <b>parts of</b> (8 minutes is a good start).</li>
+          <li>Press <b>Split long recording</b>. It cuts at natural pauses and makes my-talk-part-01, -02 and so on.</li>
+          <li>Change <b>Project name</b> to <b>my-talk-part-01</b> and press <b>2. Edit with the editor</b>. Finish that part in the editor's window.</li>
+          <li>Repeat for each part.</li>
+          <li>Change <b>Project name</b> back to <b>my-talk</b> and press <b>Join edited parts</b>. The folder opens on <span class="path">my-talk-joined.mp4</span>.</li>
+        </ol>
+        <p class="aside">Each part is edited and rendered on its own, so memory stays low on a 16 GB PC. Parts that have not been rendered yet are named if you join too early.</p>
+      </article>
+
+      <article class="case" id="uc-trim">
+        <span class="where">Edit recording tab</span>
+        <h3>Trim dead air, no AI</h3>
+        <ol>
+          <li>Next to <b>Raw recording</b> press <b>Browse...</b> and choose your take.</li>
+          <li>Press <b>Quick trim (no AI)</b>.</li>
+          <li>The folder opens on a new file ending in <span class="path">.tight.mp4</span>, saved next to the original.</li>
+        </ol>
+        <p class="aside">It only shortens pauses longer than about half a second, and it works one piece at a time, so even an hour-long recording stays within memory. Your original file is not changed.</p>
+      </article>
+
+      <article class="case" id="uc-social">
+        <span class="where">Publish tab</span>
+        <h3>Write social posts</h3>
+        <ol>
+          <li>Make sure the <b>Create</b> tab shows the <b>Project name</b> of a finished video.</li>
+          <li>Press <b>Write social posts (local)</b>.</li>
+          <li>The <span class="path">social</span> folder opens with <span class="path">linkedin.txt</span>, <span class="path">x-thread.txt</span>, <span class="path">carousel.txt</span> and the slide images.</li>
+          <li>To sharpen them, press <b>Polish with Claude Code</b> and review its changes.</li>
+          <li>Copy the text and upload the slides to each platform yourself.</li>
+        </ol>
+        <p class="aside">These are drafts. The app never posts to LinkedIn, X or Instagram.</p>
+      </article>
+
+      <article class="case" id="uc-youtube">
+        <span class="where">Publish tab</span>
+        <h3>Publish to YouTube</h3>
+        <ol>
+          <li>First time only: in Google Cloud Console create a project, enable <b>YouTube Data API v3</b>, create an OAuth client of type <b>Desktop app</b> and download its JSON file.</li>
+          <li>First time only: press <b>YouTube sign-in file...</b> and choose that file.</li>
+          <li>Press <b>Load</b>, then <b>Write title + description (local)</b>.</li>
+          <li>Edit <b>Title</b>, <b>Description</b> and <b>Tags (commas)</b>.</li>
+          <li>Choose <b>Privacy</b>. To schedule, keep it <b>private</b> and type a time in <b>Schedule</b>, like 2026-12-01 09:30.</li>
+          <li>Press <b>Save</b>, then <b>Upload to YouTube</b>, and confirm.</li>
+          <li>The first upload opens your browser to sign in. Press <b>Open</b> to see the video afterwards.</li>
+        </ol>
+        <p class="aside">Uploads are private unless you change Privacy. The sign-in is remembered in <span class="path">workspace\youtube_token.json</span>; treat that file like a password.</p>
+      </article>
+
+      <article class="case" id="uc-import">
+        <span class="where">Analyze tab</span>
+        <h3>Import your videos from YouTube</h3>
+        <ol>
+          <li>Paste a video, playlist or channel link in <b>YouTube URL or file</b>.</li>
+          <li>Set how many videos to take in the <b>up to</b> box.</li>
+          <li>Press <b>Download + index (YouTube)</b>.</li>
+          <li>The videos land in <span class="path">workspace\episodes</span> and are added to the footage index.</li>
+        </ol>
+        <p class="aside">Only for videos you own or have permission to reuse.</p>
+      </article>
+
+      <article class="case" id="uc-voice">
+        <span class="where">Voice clone tab</span>
+        <h3>Make a voiceover only</h3>
+        <ol>
+          <li>Check that <b>Reference WAV</b> points to your voice sample.</li>
+          <li>Type or paste the words in <b>Script to speak</b>.</li>
+          <li>Choose <b>Language</b> and leave <b>Device</b> on <b>cuda</b>.</li>
+          <li>Press <b>Generate voiceover</b>, then <b>Play last voiceover</b>.</li>
+        </ol>
+        <p class="aside">The file is saved in <span class="path">workspace\output</span>. Only clone voices of people who have agreed.</p>
+      </article>
+
+      <article class="case" id="uc-assemble">
+        <span class="where">Assemble tab</span>
+        <h3>Join clips by hand</h3>
+        <ol>
+          <li>Press <b>Add...</b> and choose your clips. Use <b>Move up</b> and <b>Move down</b> to order them.</li>
+          <li>Optional: choose a <b>Voiceover</b> and a <b>Music</b> file.</li>
+          <li>Choose <b>Format</b> and tick <b>Burn in captions</b> if you want them.</li>
+          <li>Press <b>Render MP4</b>, then <b>Play last render</b>.</li>
+        </ol>
+        <p class="aside">The result is saved in <span class="path">workspace\output</span>.</p>
+      </article>
+
+      <article class="case" id="uc-rules">
+        <span class="where">Scenes tab · Edit recording tab</span>
+        <h3>Make a correction stick</h3>
+        <ol>
+          <li><b>Scenes</b> tab: press <b>Add a house rule...</b>.</li>
+          <li>Type the correction as one sentence, for example "Never open with a greeting."</li>
+          <li>Press <b>Save rule</b>.</li>
+          <li>To review or delete rules, go to <b>Edit recording</b> and press <b>House rules</b>.</li>
+        </ol>
+        <p class="aside">Every later script, edit and social post follows these rules.</p>
+      </article>
+
+      <article class="case" id="uc-connect">
+        <span class="where">Settings tab · once per PC</span>
+        <h3>Connect an outside service</h3>
+        <ol>
+          <li>Open the <b>Settings</b> tab and press <b>Check all</b>. Each service shows <b>connected</b>, <b>not connected</b> or <b>not checked</b>.</li>
+          <li>Press <b>Connect</b> on the service's row:
+            <b>Higgsfield</b> and <b>vidIQ</b> open claude.ai's Connectors page to sign in there;
+            <b>Codex</b> and <b>Claude Code</b> open a sign-in window;
+            <b>YouTube</b> asks for the Google sign-in file once, then opens your browser;
+            <b>Google Drive</b> and <b>Riverside</b> ask for a folder.</li>
+          <li>Press <b>Check all</b> again to confirm it shows <b>connected</b>.</li>
+          <li>To stop using one, press <b>Disconnect</b>. It is switched off in every project at once.</li>
+        </ol>
+        <p class="aside">A service that is not connected cannot be ticked in the Services tab or chosen as the editor. The check is best effort: a connected service can still fail when used, and the work then carries on without it.</p>
+      </article>
+
+      <article class="case" id="uc-riverside">
+        <span class="where">Settings tab · optional</span>
+        <h3>Import a Riverside session</h3>
+        <ol>
+          <li>In Riverside, download the session's <b>separate tracks</b> (one video per person) into one folder per session.</li>
+          <li>First time only: on the <b>Riverside exports folder</b> row press <b>Connect</b> and choose the folder that holds those session folders.</li>
+          <li>Press <b>Import Riverside session...</b> and choose one session's folder.</li>
+          <li>Wait while it builds the episode (roughly as long as the session) and works out who speaks when.</li>
+          <li>Use it like any episode: <b>Highlights</b> with <b>Active speaker</b> framing now cuts exactly to whoever is talking.</li>
+        </ol>
+        <p class="aside">Handles two to four people. Each person's own track is also a clean source for the Voice clone sample.</p>
+      </article>
+
+      <article class="case" id="uc-services">
+        <span class="where">Services tab · optional</span>
+        <h3>Switch on a service for one project</h3>
+        <ol>
+          <li>Choose <b>Settings for</b>: the Create tab project or the Edit recording project. Press <b>Load</b>.</li>
+          <li>Tick <b>Higgsfield</b>, <b>vidIQ</b> or <b>Google Drive</b>. Everything starts unticked, and a service marked <b>(not connected)</b> cannot be ticked until you connect it in Settings.</li>
+          <li>Set the credit <b>cap</b> for each paid service.</li>
+          <li>For Google Drive, press <b>Drive folder...</b> and choose a folder that Google Drive for desktop syncs.</li>
+          <li>Press <b>Save for this project</b>, or <b>Save as my default</b> to use the same choice for new projects.</li>
+        </ol>
+        <p class="aside">Nothing in the app needs these. A service that is off is named as not allowed in every prompt Claude Code receives.</p>
+      </article>
+
+      <article class="case" id="uc-service-tasks">
+        <span class="where">Services tab · optional</span>
+        <h3>Use vidIQ or Higgsfield on a video</h3>
+        <ol>
+          <li>Make sure the <b>Create</b> tab shows the right <b>Project name</b> and the service is switched on.</li>
+          <li>Before writing the outline, press <b>Ideas (vidIQ)</b> for angles backed by videos that are working now.</li>
+          <li>After the video is made, press <b>Title + thumbnail (vidIQ)</b>, <b>Music bed (vidIQ)</b> or <b>Dub (Higgsfield)</b> with a language chosen.</li>
+          <li>For a scene that needs better pictures, type its number in <b>Scene</b> and press <b>Generated B-roll (Higgsfield)</b>.</li>
+          <li>In Claude Code's window, read the quoted cost and answer yes or no.</li>
+          <li>Press <b>Open spending log</b> to see every credit spent on this project.</li>
+          <li>Press <b>Copy to Drive folder</b> to put the finished files in Google Drive (free, no upload by Claude).</li>
+        </ol>
+        <p class="aside">Caps are instructions Claude follows and logs against, not limits the services enforce. Uploading to a service sends your footage to that company.</p>
+      </article>
+
+      <article class="case" id="uc-codex">
+        <span class="where">Edit recording tab · optional</span>
+        <h3>Edit with Codex instead of Claude Code</h3>
+        <ol>
+          <li>Install with <code>-WithCodex</code>, then run <code>codex</code> once in PowerShell and choose <b>Sign in with ChatGPT</b>.</li>
+          <li>In <b>Edit recording</b>, set <b>Editor</b> to <b>Codex (ChatGPT)</b>.</li>
+          <li>Press <b>2. Edit with the editor</b> and work in Codex's window as you would with Claude.</li>
+        </ol>
+        <p class="aside">Codex uses your ChatGPT plan. It cannot use Higgsfield or vidIQ, which are connected to your Claude account.</p>
+      </article>
+    </div>
+  </section>
+
+  <div class="notice">
+    <h3>Before you rely on it</h3>
+    <p>The app has passed its automated tests with stand-ins for the AI models, but it has not yet run on a Windows PC. Treat the first install as a test and keep the log files it writes.</p>
+  </div>
+
+  <section id="checklist">
+    <div class="check-head">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="eyebrow">Installation and first video</span>
+        <h2>Checklist</h2>
+      </div>
+      <div class="progress"><span id="done">0 of 0</span><span class="bar"><i id="fill"></i></span><button id="reset" type="button">Clear ticks</button></div>
+    </div>
+    <p class="muted" style="font-size:0.9rem">Ticks are saved in this browser only.</p>
+    <div id="groups" style="display:flex;flex-direction:column;gap:16px"></div>
+
+    <div class="group">
+      <h3>If something goes wrong</h3>
+      <dl class="fix">
+        <div><dt>The install stops with an error</dt><dd>Fix what it names and run the same command again. Finished steps are skipped.</dd></div>
+        <div><dt>A stage fails while making a video</dt><dd>Press 2. Approve + make video again. Finished work is kept.</dd></div>
+        <div><dt>"No local chat model is installed"</dt><dd>Open PowerShell and run <code>ollama pull gemma3:4b</code>, or pick another model in the Create tab.</dd></div>
+        <div><dt>Out of graphics memory</dt><dd>Close other programs that use the GPU and untick AI stills.</dd></div>
+        <div><dt>A voice line sounds wrong</dt><dd>Scenes tab, select the scene, press Re-make this scene.</dd></div>
+        <div><dt>Footage shows the wrong person</dt><dd>Scenes tab, change the search words or press Re-make this scene for the next best moment.</dd></div>
+      </dl>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  var CHECK = 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\Downloads\\Setup-PodcastStudio.ps1" -CheckOnly';
+  var INSTALL = 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\Downloads\\Setup-PodcastStudio.ps1"';
+  var GROUPS = [
+    { title: 'Before you install', items: [
+      ['pc', 'PC has an NVIDIA graphics card (4 GB or more) and 16 GB of memory'],
+      ['disk', 'About 25 GB of free disk space', 'Most of it is PyTorch and the AI models.'],
+      ['driver', 'NVIDIA driver is up to date'],
+      ['eps', 'Episode videos are in one folder on this PC', 'The app searches local files, not Google Drive or YouTube.'],
+      ['consent', 'Everyone whose voice will be cloned has agreed']
+    ]},
+    { title: 'Install', items: [
+      ['save', 'Save Setup-PodcastStudio.ps1 to your Downloads folder'],
+      ['check', 'Run the check-only command in a normal PowerShell window', 'It reports GPU, memory, disk and network. Nothing is installed.', CHECK],
+      ['install', 'Run the install command', 'Expect 20 to 40 minutes. Leave the window open.', INSTALL],
+      ['passed', 'The window ends with "self-test passed"'],
+      ['logs', 'Keep the three log files', 'PodcastStudio\\logs\\install-<time>.log, selftest.json and gui-smoke.json. Send them if anything failed.']
+    ]},
+    { title: 'Set up once', items: [
+      ['open', 'Open Podcast Studio from the desktop shortcut'],
+      ['voice', 'Voice clone tab: extract an 8 to 15 second voice sample', 'Choose a stretch with one speaker and no music. Press Play sample to check it.'],
+      ['index', 'Create tab: choose the episode folder and press Index footage', 'This transcribes every episode. A 45-minute episode takes a few minutes.'],
+      ['bible', 'Analyze tab: press Build style bible (local)'],
+      ['brand', 'Create tab: press Brand kit and set colours, font and logo'],
+      ['full', 'Create tab: press Full self-test', 'Loads the real models and records how much graphics memory they use.']
+    ]},
+    { title: 'Make your first video', items: [
+      ['name', 'Type a project name, a length in seconds, and choose the shape and framing'],
+      ['topic', 'Type the topic and press 1. Draft outline'],
+      ['hook', 'Pick one of the three hooks and edit the outline'],
+      ['make', 'Press 2. Approve + make video and wait for the folder to open'],
+      ['watch', 'Watch final.mp4 from start to end'],
+      ['qa', 'Scenes tab: press Quality report and read any warnings'],
+      ['fix', 'Scenes tab: fix any weak scene, then press Apply changes + re-make video'],
+      ['clips', 'Highlights tab: choose an indexed episode and press Find highlights + make clips', 'Optional. Makes clips from the hosts\' own words, with no narration.'],
+      ['record', 'Edit recording tab: choose a raw take, press 1. Prepare, then 2. Edit with Claude Code', 'Optional and hybrid. Claude Code is a cloud model and uses your Claude subscription; the video files stay on this PC.'],
+      ['publish', 'Publish tab: write the title and description, then upload when ready', 'Optional. Needs a one-time YouTube sign-in file. Uploads are private unless you change it.']
+    ]}
+  ];
+  var KEY = 'podcast-studio-checklist-v1';
+  var state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { state = {}; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+  var host = document.getElementById('groups');
+  var total = 0;
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+
+  GROUPS.forEach(function (g, gi) {
+    var box = el('div', 'group');
+    var head = el('div', 'gh');
+    head.appendChild(el('h3', null, g.title));
+    var count = el('span', 'count'); count.id = 'count-' + gi; head.appendChild(count);
+    box.appendChild(head);
+    var list = el('ul', 'items');
+    g.items.forEach(function (it) {
+      total++;
+      var li = el('li');
+      var label = el('label');
+      var cb = el('input'); cb.type = 'checkbox'; cb.id = 'chk-' + it[0]; cb.checked = !!state[it[0]];
+      cb.addEventListener('change', function () { state[it[0]] = cb.checked; save(); update(); });
+      var t = el('span', 't'); t.appendChild(el('span', null, it[1]));
+      if (it[2]) t.appendChild(el('small', null, it[2]));
+      label.appendChild(cb); label.appendChild(t); li.appendChild(label);
+      if (it[3]) {
+        var row = el('div', 'cmd');
+        var pre = el('pre', null, it[3]);
+        var btn = el('button', null, 'Copy'); btn.type = 'button';
+        btn.addEventListener('click', function () {
+          var ok = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+          var fallback = function () { var r = document.createRange(); r.selectNodeContents(pre); var s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = 'Selected'; };
+          try { navigator.clipboard.writeText(it[3]).then(ok, fallback); } catch (e) { fallback(); }
+        });
+        row.appendChild(pre); row.appendChild(btn); li.appendChild(row);
+      }
+      list.appendChild(li);
+    });
+    box.appendChild(list); host.appendChild(box);
+  });
+
+  function update() {
+    var done = 0;
+    GROUPS.forEach(function (g, gi) {
+      var d = g.items.filter(function (it) { return state[it[0]]; }).length;
+      done += d;
+      document.getElementById('count-' + gi).textContent = d + ' / ' + g.items.length;
+    });
+    document.getElementById('done').textContent = done + ' of ' + total;
+    document.getElementById('fill').style.width = (total ? 100 * done / total : 0) + '%';
+  }
+  var reset = document.getElementById('reset'), armed = false;
+  reset.addEventListener('click', function () {
+    if (!armed) { armed = true; reset.textContent = 'Press again to clear'; setTimeout(function () { armed = false; reset.textContent = 'Clear ticks'; }, 3000); return; }
+    state = {}; save(); armed = false; reset.textContent = 'Clear ticks';
+    document.querySelectorAll('#groups input[type=checkbox]').forEach(function (c) { c.checked = false; });
+    update();
+  });
+  update();
+})();
+</script>
+</body>
+</html>
+'@
 $binaries = [ordered]@{}
 $binaries['models\face_detection_yunet_2023mar.onnx'] = @'
 CAYSB3B5dG9yY2gaAzEuNzrzmA4KggEKBWlucHV0CgM0MjAKAzQyMRIDNDE5GgZDb252XzAiBENvbnYqEgoJZGlsYXRpb25zQAFAAaABByoMCgVncm91cBgB
@@ -9693,6 +10384,14 @@ $sc.WorkingDirectory = $appDir
 $sc.IconLocation = 'shell32.dll,115'
 $sc.Save()
 Ok "Desktop shortcut: $lnk"
+$guide = Join-Path $appDir 'guide.html'
+if (Test-Path $guide) {
+    $gl = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Podcast Studio Guide.lnk'))
+    $gl.TargetPath = $guide
+    $gl.IconLocation = 'shell32.dll,23'
+    $gl.Save()
+    Ok 'Desktop shortcut: Podcast Studio Guide'
+}
 
 # ------------------------------------------------------------------ 10. self-test
 Step 'Self-test (syntax, tools, packages, GPU, local model, render)'
