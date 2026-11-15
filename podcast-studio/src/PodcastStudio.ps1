@@ -7,6 +7,7 @@ $script:Smoke = [bool]$SmokeTest
 $Error.Clear()
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Security
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $Root   = Split-Path $PSScriptRoot -Parent
@@ -38,8 +39,84 @@ $env:PYTHONUNBUFFERED = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONPATH = $App
 $env:PSTUDIO_ROOT = $Root
-$userFal = [Environment]::GetEnvironmentVariable('FAL_KEY', 'User')
-if ($userFal) { $env:FAL_KEY = $userFal }
+
+# ---------------------------------------------------------------- secrets (Windows DPAPI, this Windows user only)
+# Same format as secretstore.py: "dpapi1:<base64>". Keys are loaded into this app's own process, never into
+# the user's environment variables.
+$script:SecretEntropy = [System.Text.Encoding]::UTF8.GetBytes('PodcastStudio.v1')
+function Secret-Path([string]$name) {
+    if ($name -in 'fal', 'hf') { return (Join-Path $Shared "secrets\$name.dat") }
+    return (Join-Path $Work "secrets\$name.dat")
+}
+function Protect-Secret([string]$name, [string]$text) {
+    $p = Secret-Path $name
+    New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null
+    $bytes = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($text),
+        $script:SecretEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    [System.IO.File]::WriteAllText($p, 'dpapi1:' + [Convert]::ToBase64String($bytes), [System.Text.Encoding]::ASCII)
+}
+function Unprotect-Secret([string]$name) {
+    $p = Secret-Path $name
+    if (-not (Test-Path $p)) { return $null }
+    try {
+        $kind, $body = ([System.IO.File]::ReadAllText($p).Trim() -split ':', 2)
+        $raw = [Convert]::FromBase64String($body)
+        if ($kind -eq 'plain1') { $text = [System.Text.Encoding]::UTF8.GetString($raw); Protect-Secret $name $text; return $text }
+        if ($kind -ne 'dpapi1') { return $null }
+        return [System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect($raw,
+            $script:SecretEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))
+    } catch { return $null }
+}
+function Remove-Secret([string]$name) { Remove-Item (Secret-Path $name) -Force -ErrorAction Ignore }
+function Test-Secret([string]$name) { return [bool](Unprotect-Secret $name) }
+function Migrate-Secrets {
+    # older versions kept the fal.ai key in a user environment variable and YouTube sign-ins as plain JSON
+    $userFal = [Environment]::GetEnvironmentVariable('FAL_KEY', 'User')
+    if ($userFal) {
+        if (-not (Test-Secret 'fal')) { Protect-Secret 'fal' $userFal }
+        if (Test-Secret 'fal') { [Environment]::SetEnvironmentVariable('FAL_KEY', $null, 'User') }
+    }
+    foreach ($pair in @(@('youtube_client', 'youtube_client_secret.json'), @('youtube_token', 'youtube_token.json'))) {
+        $old = Join-Path $Work $pair[1]
+        if (Test-Path $old) {
+            if (-not (Test-Secret $pair[0])) { Protect-Secret $pair[0] ([System.IO.File]::ReadAllText($old)) }
+            if (Test-Secret $pair[0]) { Remove-Item $old -Force }
+        }
+    }
+}
+function Load-SecretsIntoProcess {
+    $k = Unprotect-Secret 'fal'; if ($k) { $env:FAL_KEY = $k } else { Remove-Item Env:FAL_KEY -ErrorAction Ignore }
+    $h = Unprotect-Secret 'hf'; if ($h) { $env:HF_TOKEN = $h } else { Remove-Item Env:HF_TOKEN -ErrorAction Ignore }
+}
+function Ask-Secret([string]$title, [string]$hint) {
+    # masked input box; returns the text or $null
+    $kf = New-Object System.Windows.Forms.Form
+    $kf.Text = $title; $kf.Size = New-Object System.Drawing.Size(480, 180); $kf.StartPosition = 'CenterParent'
+    $kf.FormBorderStyle = 'FixedDialog'; $kf.MaximizeBox = $false; $kf.MinimizeBox = $false
+    $kl = New-Object System.Windows.Forms.Label; $kl.Text = $hint
+    $kl.Location = New-Object System.Drawing.Point(15, 12); $kl.Size = New-Object System.Drawing.Size(440, 36)
+    $kt = New-Object System.Windows.Forms.TextBox; $kt.UseSystemPasswordChar = $true
+    $kt.Location = New-Object System.Drawing.Point(15, 55); $kt.Size = New-Object System.Drawing.Size(430, 24)
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save'; $ok.Location = New-Object System.Drawing.Point(290, 95)
+    $ok.DialogResult = 'OK'; $kf.AcceptButton = $ok
+    $no = New-Object System.Windows.Forms.Button; $no.Text = 'Cancel'; $no.Location = New-Object System.Drawing.Point(370, 95)
+    $no.DialogResult = 'Cancel'; $kf.CancelButton = $no
+    $kf.Controls.AddRange(@($kl, $kt, $ok, $no))
+    $r = $kf.ShowDialog(); $v = $kt.Text.Trim(); $kf.Dispose()
+    if ($r -eq 'OK' -and $v) { return $v }
+    return $null
+}
+Migrate-Secrets
+Load-SecretsIntoProcess
+function Save-YouTubeFile {
+    $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
+    if (-not $f) { return $false }
+    $text = [System.IO.File]::ReadAllText($f)
+    if ($text -notmatch '"(installed|web)"') { Msg 'That is not a Google OAuth client file. Download the "Desktop app" JSON from Google Cloud Console.'; return $false }
+    Protect-Secret 'youtube_client' $text
+    Log 'YouTube sign-in file saved (encrypted for this Windows user). You can delete the downloaded copy.'
+    return $true
+}
 
 # ---------------------------------------------------------------- helpers
 function Stamp { (Get-Date).ToString('yyyyMMdd-HHmmss') }
@@ -209,6 +286,7 @@ function Set-Workspace([string]$dir) {
     $script:Work = $dir
     $script:RulesFile = Join-Path $dir 'house-rules.md'
     $env:PSTUDIO_WORKSPACE = $dir
+    Migrate-Secrets
     foreach ($d in 'analysis','voice','scripts','clips','output','frames','projects','library','episodes','highlights','music','assets') {
         New-Item -ItemType Directory -Force -Path (Join-Path $dir $d) | Out-Null
     }
@@ -971,15 +1049,14 @@ $b = Add-Button $tP 'Save' 400 285 80
 $b.Add_Click({ if (Save-Publish) { Log 'Publish details saved.' } })
 $b = Add-Button $tP 'YouTube sign-in file...' 490 285 170
 $b.Add_Click({
-    $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
-    if ($f) { Copy-Item $f (Join-Path $Work 'youtube_client_secret.json') -Force; Log 'YouTube sign-in file saved in the workspace.' }
+    [void](Save-YouTubeFile)
 })
 $b = Add-Button $tP 'Upload to YouTube' 670 285 150
 $b.Add_Click({
     $dir = Get-Project; if (-not $dir) { return }
     if (-not (Test-Path (Join-Path $dir 'final.mp4'))) { Msg 'This project has no finished video yet.'; return }
     if (-not $pTitle.Text.Trim()) { Msg 'Add a title first.'; return }
-    if (-not (Test-Path (Join-Path $Work 'youtube_client_secret.json'))) { Msg 'Choose your YouTube sign-in file first (see the steps below).'; return }
+    if (-not (Test-Secret 'youtube_client')) { Msg 'Choose your YouTube sign-in file first (see the steps below).'; return }
     $what = "Upload ""$($pTitle.Text.Trim())"" to YouTube as $($pPrivacy.SelectedItem)?"
     if ($pWhen.Text.Trim()) { $what += " It will go public at $($pWhen.Text.Trim())." }
     if ([System.Windows.Forms.MessageBox]::Show($what, 'Podcast Studio', 'YesNo') -ne 'Yes') { return }
@@ -1134,7 +1211,7 @@ $nV.Size = New-Object System.Drawing.Size(900, 60)
 $tG = New-Tab 'Settings'
 $b = Add-Button $tG 'Check all' 10 10 120
 $b.Add_Click({ Run-Py 'Check every connection' 'connections.py' @('check') { Update-Connections } })
-$gWhen = Add-Label $tG '' 140 14 540
+$gWhen = Add-Label $tG '' 140 14 530
 $script:connRows = @{}
 $connList = @(
     @('claude', 'Claude Code'), @('higgsfield', 'Higgsfield (via Claude)'), @('vidiq', 'vidIQ (via Claude)'),
@@ -1169,6 +1246,20 @@ $gNote = Add-Label $tG ('Connect each service once here. A service that is not c
     'Higgsfield and vidIQ are connected on claude.ai, then checked here through Claude Code; its list can occasionally misreport a connector, so a service can still fail when used.') 240 350 670
 $gNote.Size = New-Object System.Drawing.Size(670, 70)
 
+function Set-FalKey {
+    $v = Ask-Secret 'fal.ai API key' 'Paste your fal.ai key. It is encrypted for this Windows user and only given to this app while it runs.'
+    if (-not $v) { return $false }
+    Protect-Secret 'fal' $v; $env:FAL_KEY = $v
+    Log 'fal.ai key saved (encrypted).'
+    return $true
+}
+function Set-HfToken {
+    $v = Ask-Secret 'Hugging Face token' 'Optional: a read token from huggingface.co/settings/tokens, used only for who-said-what labels (WhisperX).'
+    if (-not $v) { return $false }
+    Protect-Secret 'hf' $v; $env:HF_TOKEN = $v
+    Log 'Hugging Face token saved (encrypted).'
+    return $true
+}
 function Update-Connections {
     $c = Get-Connections
     $last = ''
@@ -1185,6 +1276,7 @@ function Update-Connections {
         }
     }
     $gWhen.Text = if ($last) { "Last checked $last" } else { 'Not checked yet - press Check all.' }
+    if ($script:wiz) { Wiz-Refresh }
 }
 function Connect-Service([string]$key) {
     switch ($key) {
@@ -1198,11 +1290,8 @@ function Connect-Service([string]$key) {
             Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', 'codex login; Write-Host "Close this window and press Check all."'
         }
         'youtube' {
-            $secret = Join-Path $Work 'youtube_client_secret.json'
-            if (-not (Test-Path $secret)) {
-                $f = Pick-File 'Google sign-in file|*.json|All files|*.*' ([Environment]::GetFolderPath('UserProfile'))
-                if (-not $f) { Msg 'Choose the OAuth "Desktop app" JSON file from Google Cloud Console (see the Publish tab for the steps).'; return }
-                Copy-Item $f $secret -Force
+            if (-not (Test-Secret 'youtube_client')) {
+                if (-not (Save-YouTubeFile)) { Msg 'Choose the OAuth "Desktop app" JSON file from Google Cloud Console (see the Publish tab for the steps).'; return }
             }
             Run-Py 'Sign in to YouTube (your browser opens)' 'publish.py' @('login', '--project', $Work) { Run-Py 'Check YouTube' 'connections.py' @('check', '--service', 'youtube') { Update-Connections } }
         }
@@ -1212,7 +1301,7 @@ function Connect-Service([string]$key) {
             if ($d.ShowDialog() -ne 'OK') { return }
             Run-Py "Connect $key folder" 'connections.py' @('folder', '--service', $key, '--path', $d.SelectedPath) { Update-Connections }
         }
-        'fal' { $tabs.SelectedTab = $t3; Msg 'Press "Set fal.ai key" on this tab, then come back and press Check all.' }
+        'fal' { if (Set-FalKey) { Run-Py 'Check fal.ai' 'connections.py' @('check', '--service', 'fal') { Update-Connections } } }
         'ollama' { Run-Py 'Check Ollama' 'connections.py' @('check', '--service', 'ollama') { Update-Connections } }
     }
 }
@@ -1222,13 +1311,168 @@ function Disconnect-Service([string]$key) {
         { $_ -in 'higgsfield', 'vidiq' } { Start-Process 'https://claude.ai/settings/connectors'; Msg 'Disconnect it on claude.ai, then press Check all.' }
         'codex' { & codex logout 2>$null | Out-Null; Run-Py 'Check Codex' 'connections.py' @('check', '--service', 'codex') { Update-Connections } }
         'fal' {
-            [Environment]::SetEnvironmentVariable('FAL_KEY', $null, 'User'); Remove-Item Env:FAL_KEY -ErrorAction Ignore
+            Remove-Secret 'fal'; [Environment]::SetEnvironmentVariable('FAL_KEY', $null, 'User'); Remove-Item Env:FAL_KEY -ErrorAction Ignore
             Run-Py 'Check fal.ai' 'connections.py' @('check', '--service', 'fal') { Update-Connections }
         }
         default { Run-Py "Disconnect $key" 'connections.py' @('clear', '--service', $key) { Update-Connections } }
     }
 }
 Update-Connections
+
+# ---------------------------------------------------------------- setup wizard (first start, and Settings > Setup wizard...)
+# Walks through every optional connection. Each step can be skipped; nothing here is required to make videos.
+$script:SetupDoneFile = Join-Path $Shared 'setup-done.json'
+$script:wiz = $null
+function Wiz-ConnText([string[]]$keys) {
+    $c = Get-Connections
+    $lines = foreach ($k in $keys) {
+        if ($k -eq 'hf') { 'Hugging Face token: ' + $(if (Test-Secret 'hf') { 'saved (encrypted)' } else { 'not saved' }); continue }
+        $e = $c.services.$k
+        $name = ($connList | Where-Object { $_[0] -eq $k } | Select-Object -First 1)[1]
+        if ($e) { '{0}: {1} - {2}' -f $name, $(if ($e.connected) { 'connected' } else { 'not connected' }), $e.detail }
+        else { "${name}: not checked yet" }
+    }
+    return ($lines -join "`r`n")
+}
+function Wiz-Check([string[]]$keys) {
+    $svc = @($keys | Where-Object { $_ -ne 'hf' })
+    if (-not $svc) { Wiz-Refresh; return }
+    $argv = @('check'); if ($svc.Count -eq 1) { $argv += @('--service', $svc[0]) }
+    Run-Py ('Check ' + ($svc -join ', ')) 'connections.py' $argv { Update-Connections }
+}
+function Get-WizSteps {
+    return @(
+        @{ title = 'Welcome to Podcast Studio'; keys = @()
+           body = ("Making videos needs no account: the language model, voice, captions and editing all run on this PC.`r`n`r`n" +
+                   "The next steps connect optional extras: Claude Code (AI editing), Higgsfield and vidIQ (through Claude), Codex, " +
+                   "YouTube upload, a Google Drive folder, Riverside tracks and cloud keys. Skip any step; you can come back from " +
+                   "Settings > Setup wizard...`r`n`r`n" +
+                   "Security: keys and the YouTube sign-in are encrypted with Windows (DPAPI) so only your Windows account on this PC " +
+                   "can read them. They are never put in environment variables, profile exports or logs. Claude Code, Codex and " +
+                   "claude.ai keep their own sign-ins; Podcast Studio never sees those passwords.")
+           actions = @() },
+        @{ title = 'Claude Code (optional: AI editing)'; keys = @('claude')
+           body = ("Claude Code edits recordings with the Herk Edit Kit and polishes social posts. It uses your Claude subscription.`r`n`r`n" +
+                   "1. Press 'Sign in to Claude Code'. A window opens; type /login if asked and finish in your browser.`r`n" +
+                   "2. Close that window and press 'Check'.")
+           actions = @(@('Sign in to Claude Code', { Connect-Service 'claude' }), @('Check', { Wiz-Check @('claude') })) },
+        @{ title = 'Higgsfield and vidIQ (optional, through Claude)'; keys = @('higgsfield', 'vidiq')
+           body = ("These are connected to your Claude account, not to this app.`r`n`r`n" +
+                   "1. Press 'Open claude.ai connectors' and connect Higgsfield and/or vidIQ there.`r`n" +
+                   "2. Press 'Check' (it asks Claude Code which connectors it can use).`r`n`r`n" +
+                   "Each project still decides whether they may be used, with a credit cap (Services tab).")
+           actions = @(@('Open claude.ai connectors', { Start-Process 'https://claude.ai/settings/connectors' }), @('Check', { Wiz-Check @('higgsfield', 'vidiq') })) },
+        @{ title = 'Codex (optional: second AI editor)'; keys = @('codex')
+           body = ("Codex can be chosen as the editor in the Edit recording tab. It signs in with your ChatGPT plan.`r`n`r`n" +
+                   "It is installed only when setup ran with -WithCodex. Press 'Sign in to Codex', finish in the browser, then 'Check'.")
+           actions = @(@('Sign in to Codex', { Connect-Service 'codex' }), @('Check', { Wiz-Check @('codex') })) },
+        @{ title = 'YouTube upload (optional)'; keys = @('youtube')
+           body = ("Uploads use your own Google sign-in. One-time setup in Google Cloud Console:`r`n" +
+                   "1. Create a project, enable 'YouTube Data API v3'.`r`n" +
+                   "2. OAuth consent screen: External, add yourself as a test user.`r`n" +
+                   "3. Credentials > Create credentials > OAuth client ID > Desktop app > Download JSON.`r`n" +
+                   "4. Press 'Choose sign-in file...' (it is stored encrypted; delete the download afterwards).`r`n" +
+                   "5. Press 'Sign in (browser)'.`r`n`r`n" +
+                   "Each profile signs in to its own channel.")
+           actions = @(@('Open Google Cloud Console', { Start-Process 'https://console.cloud.google.com/apis/credentials' }),
+                       @('Choose sign-in file...', { if (Save-YouTubeFile) { Wiz-Check @('youtube') } }),
+                       @('Sign in (browser)', { Connect-Service 'youtube' })) },
+        @{ title = 'Folders: Google Drive and Riverside (optional)'; keys = @('drive', 'riverside')
+           body = ("Google Drive: choose a folder that Google Drive for desktop syncs; finished videos can be copied there.`r`n`r`n" +
+                   "Riverside: choose the folder you download a session's separate tracks into. No Riverside login is needed.")
+           actions = @(@('Choose Drive folder...', { Connect-Service 'drive' }), @('Choose Riverside folder...', { Connect-Service 'riverside' })) },
+        @{ title = 'Cloud keys (optional)'; keys = @('fal', 'hf')
+           body = ("fal.ai key: only for the optional Cloud tab (paid cloud video models).`r`n" +
+                   "Hugging Face token: only for who-said-what labels with WhisperX.`r`n`r`n" +
+                   "Keys are typed into a hidden box and saved encrypted for your Windows account. 'Remove keys' deletes both.")
+           actions = @(@('Set fal.ai key...', { if (Set-FalKey) { Wiz-Check @('fal') } }),
+                       @('Set Hugging Face token...', { if (Set-HfToken) { Wiz-Refresh } }),
+                       @('Remove keys', { Remove-Secret 'fal'; Remove-Secret 'hf'; Load-SecretsIntoProcess; Wiz-Check @('fal') })) },
+        @{ title = 'Your show (optional)'; keys = @(); profile = $true
+           body = ("Each show or persona is a profile: brand kit, style, house rules, voices, footage and YouTube sign-in.`r`n`r`n" +
+                   "Type a name and press 'Create profile' to start one now, or keep using 'Main'.")
+           actions = @() },
+        @{ title = 'All set'; keys = @('claude', 'higgsfield', 'vidiq', 'codex', 'youtube', 'drive', 'riverside', 'fal', 'hf')
+           body = ("Press 'Check all' to see where everything stands, then 'Finish'.`r`n`r`n" +
+                   "Anything not connected simply cannot be chosen in a project. Open this again from Settings > Setup wizard...")
+           actions = @(@('Check all', { Wiz-Check @('claude', 'codex', 'youtube', 'drive', 'riverside', 'fal') })) }
+    )
+}
+function New-SetupWizard {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Podcast Studio setup'; $f.Size = New-Object System.Drawing.Size(720, 520); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $w = @{ form = $f; steps = (Get-WizSteps); index = 0; buttons = @() }
+    $w.step = Add-Label $f '' 20 12 660
+    $w.title = Add-Label $f '' 20 34 660
+    $w.title.Font = New-Object System.Drawing.Font($form.Font.FontFamily, 13, [System.Drawing.FontStyle]::Bold); $w.title.Height = 30
+    $w.body = Add-Label $f '' 20 72 660; $w.body.Size = New-Object System.Drawing.Size(660, 190)
+    $w.status = New-Object System.Windows.Forms.TextBox
+    $w.status.Multiline = $true; $w.status.ReadOnly = $true; $w.status.ScrollBars = 'Vertical'
+    $w.status.Location = New-Object System.Drawing.Point(20, 320); $w.status.Size = New-Object System.Drawing.Size(660, 95)
+    $f.Controls.Add($w.status)
+    $w.name = Add-Text $f 20 275 300; $w.makeProfile = Add-Button $f 'Create profile' 330 273 140
+    $w.makeProfile.Add_Click({
+        $n = $script:wiz.name.Text.Trim(); if (-not $n) { Msg 'Type a name first.'; return }
+        $out = & $Py -u (Join-Path $App 'profiles.py') create --name $n 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { Msg ('Could not create the profile: ' + $out.Trim()); return }
+        Fill-ProfileList; Switch-Profile $n; Fill-ProfileList
+        $script:wiz.status.Text = "Profile '$n' created and selected."
+    })
+    $w.back = Add-Button $f '< Back' 340 430 100; $w.back.Add_Click({ Wiz-Go ($script:wiz.index - 1) })
+    $w.next = Add-Button $f 'Next >' 450 430 100; $w.next.Add_Click({ Wiz-Go ($script:wiz.index + 1) })
+    $w.finish = Add-Button $f 'Finish' 560 430 120; $w.finish.Add_Click({ Wiz-Finish; $script:wiz.form.Close() })
+    $w.later = Add-Button $f 'Skip setup for now' 20 430 160; $w.later.Add_Click({ Wiz-Finish; $script:wiz.form.Close() })
+    $f.Add_FormClosed({ $script:wiz = $null })
+    $script:wiz = $w
+    Wiz-Go 0
+    return $w
+}
+function Wiz-Go([int]$i) {
+    $w = $script:wiz
+    if (-not $w) { return }
+    $i = [Math]::Max(0, [Math]::Min($i, $w.steps.Count - 1))
+    $w.index = $i
+    $s = $w.steps[$i]
+    $w.step.Text = "Step $($i + 1) of $($w.steps.Count)"
+    $w.title.Text = $s.title
+    $w.body.Text = $s.body
+    foreach ($old in $w.buttons) { $w.form.Controls.Remove($old); $old.Dispose() }
+    $w.buttons = @()
+    $x = 20
+    foreach ($a in $s.actions) {
+        $width = [Math]::Max(110, 22 + 7 * $a[0].Length)
+        $btn = Add-Button $w.form $a[0] $x 273 $width
+        $btn.Tag = $a[1]
+        $btn.Add_Click({ & ([scriptblock]$this.Tag) })
+        $w.buttons += $btn
+        $x += $width + 10
+    }
+    $w.name.Visible = [bool]$s.profile; $w.makeProfile.Visible = [bool]$s.profile
+    $w.back.Enabled = $i -gt 0
+    $w.next.Enabled = $i -lt ($w.steps.Count - 1)
+    $w.next.Visible = $w.next.Enabled
+    $w.form.AcceptButton = if ($w.next.Enabled) { $w.next } else { $w.finish }
+    Wiz-Refresh
+}
+function Wiz-Refresh {
+    $w = $script:wiz
+    if (-not $w) { return }
+    $s = $w.steps[$w.index]
+    if ($s.keys.Count) { $w.status.Text = Wiz-ConnText $s.keys }
+    elseif (-not $s.profile) { $w.status.Text = '' }
+}
+function Wiz-Finish {
+    New-Item -ItemType Directory -Force -Path (Split-Path $script:SetupDoneFile) | Out-Null
+    [System.IO.File]::WriteAllText($script:SetupDoneFile, (@{ done = (Get-Date).ToString('yyyy-MM-dd HH:mm') } | ConvertTo-Json))
+}
+function Show-SetupWizard {
+    $w = New-SetupWizard
+    [void]$w.form.ShowDialog($form)
+    Update-Connections
+}
+$b = Add-Button $tG 'Setup wizard...' 690 8 220
+$b.Add_Click({ Show-SetupWizard })
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab 'Analyze'
@@ -1361,20 +1605,7 @@ $fEnd = Add-Combo $t3 150 15 460 @(
 ) $true
 $b = Add-Button $t3 'Browse models' 620 13 140; $b.Add_Click({ Start-Process 'https://fal.ai/models?keywords=wan' })
 $b = Add-Button $t3 'Set fal.ai key' 770 13 140
-$b.Add_Click({
-    $kf = New-Object System.Windows.Forms.Form
-    $kf.Text = 'fal.ai API key'; $kf.Size = New-Object System.Drawing.Size(460, 150); $kf.StartPosition = 'CenterParent'
-    $kt = New-Object System.Windows.Forms.TextBox; $kt.UseSystemPasswordChar = $true
-    $kt.Location = New-Object System.Drawing.Point(15, 20); $kt.Size = New-Object System.Drawing.Size(410, 24)
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save'; $ok.Location = New-Object System.Drawing.Point(335, 60)
-    $ok.DialogResult = 'OK'; $kf.AcceptButton = $ok
-    $kf.Controls.AddRange(@($kt, $ok))
-    if ($kf.ShowDialog() -eq 'OK' -and $kt.Text.Trim()) {
-        [Environment]::SetEnvironmentVariable('FAL_KEY', $kt.Text.Trim(), 'User')
-        $env:FAL_KEY = $kt.Text.Trim()
-        Log 'fal.ai key saved to your user environment.'
-    }
-})
+$b.Add_Click({ [void](Set-FalKey) })
 Add-Label $t3 'Prompt' 10 55 | Out-Null
 $fPrompt = Add-Text $t3 150 55 760 '' 70
 Add-Label $t3 'Image (image_url)' 10 135 | Out-Null
@@ -1494,6 +1725,7 @@ $form.Add_Shown({
     if (Test-Path $Py) { Log '  [ok] python venv' } else { Log '  [missing] python venv - re-run setup' }
     if (-not (Test-Path (Join-Path $Shared 'connections.json'))) { Log '  [info] outside services are not connected (optional): Settings tab > Check all' }
     if (Test-Path (Join-Path $Work 'library\index.json')) { Log '  [ok] footage library indexed' } else { Log '  [info] no footage library yet (Create tab > Index footage)' }
+    if (-not (Test-Path $script:SetupDoneFile) -and -not $script:Smoke) { Show-SetupWizard }
 })
 $form.Add_FormClosing({ if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null } })
 if (-not $script:Smoke) {
@@ -1737,6 +1969,43 @@ Check 'profiles and simple mode' {
     $cSimple.Checked = $false
     Expect ($simple -eq 4 -and $tabs.TabPages.Count -eq $all) "simple mode shows $simple tabs ($names), then $($tabs.TabPages.Count) of $all"
     "profile switch, defaults round-trip, simple mode $simple of $all tabs"
+}
+Check 'secrets are encrypted (DPAPI) and readable by Python' {
+    $keepWork = $Work
+    Set-Workspace (Join-Path $smokeDir 'secret-smoke')
+    Protect-Secret 'selftest' 'smoke-secret-123'
+    $raw = [System.IO.File]::ReadAllText((Secret-Path 'selftest'))
+    Expect ($raw.StartsWith('dpapi1:') -and $raw -notmatch 'smoke-secret') 'the secret file is not DPAPI-encrypted'
+    Expect ((Unprotect-Secret 'selftest') -eq 'smoke-secret-123') 'the secret did not round-trip'
+    $py = (& $Py -u (Join-Path $App 'secretstore.py') has --name selftest --workspace $Work 2>&1 | Out-String).Trim()
+    Expect ($py -match 'yes') "Python could not read the PowerShell secret: $py"
+    [System.IO.File]::WriteAllText((Join-Path $Work 'youtube_client_secret.json'), '{"installed":{"client_id":"x"}}')
+    Migrate-Secrets
+    Expect (-not (Test-Path (Join-Path $Work 'youtube_client_secret.json'))) 'the plain-text sign-in file was not removed'
+    Expect ((Unprotect-Secret 'youtube_client') -match 'client_id') 'the plain-text sign-in file was not moved into encrypted storage'
+    Remove-Secret 'selftest'
+    Set-Workspace $keepWork
+    'DPAPI round trip, PowerShell -> Python, plain-text migration'
+}
+Check 'setup wizard walks every step' {
+    $keepDone = $script:SetupDoneFile
+    $script:SetupDoneFile = Join-Path $smokeDir 'setup-done.json'
+    $w = New-SetupWizard
+    $titles = @()
+    for ($i = 0; $i -lt $w.steps.Count; $i++) {
+        Wiz-Go $i
+        Expect ($w.title.Text -and $w.body.Text) "step $($i + 1) is empty"
+        if ($w.steps[$i].keys.Count) { Expect ($w.status.Text) "step $($i + 1) shows no status" }
+        foreach ($btn in $w.buttons) { Expect ($btn.Tag -is [scriptblock]) "step $($i + 1) button '$($btn.Text)' has no action" }
+        $titles += $w.title.Text
+    }
+    Expect (-not $w.next.Enabled -and $w.back.Enabled) 'the last step should offer Back and Finish only'
+    Expect ($titles -match 'YouTube' -and $titles -match 'Claude Code' -and $titles -match 'keys') 'a connection step is missing'
+    Wiz-Finish
+    Expect (Test-Path $script:SetupDoneFile) 'Finish did not record that setup was done'
+    $w.form.Dispose(); $script:wiz = $null
+    $script:SetupDoneFile = $keepDone
+    "$($titles.Count) steps"
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

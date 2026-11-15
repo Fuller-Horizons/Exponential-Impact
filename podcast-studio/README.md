@@ -3,8 +3,13 @@
 Windows app that turns a prompt into a short video in your podcast's style, running entirely on your PC
 (4 GB NVIDIA GPU, 16 GB RAM).
 
-## Install (one command)
-Download `Setup-PodcastStudio.ps1`, then in a normal PowerShell window:
+## Install (one file)
+Download **`Install-PodcastStudio.cmd`** and double-click it. If Windows shows "Windows protected your PC", press
+**More info > Run anyway** (the file is not code-signed). It unpacks the PowerShell installer to `%TEMP%`, runs it with
+`-ExecutionPolicy Bypass` for that run only, and waits for a key press at the end. It is plain text: open it in
+Notepad to read exactly what it does. Options can be added from a command prompt: `Install-PodcastStudio.cmd -WithCodex`.
+
+The same installer as a PowerShell file, for those who prefer it:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Setup-PodcastStudio.ps1"
@@ -68,7 +73,7 @@ press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file f
 `social` folder. **Polish with Claude Code** sharpens them. They are drafts: nothing is posted for you.
 
 ## Optional extras
-- `-WithWhisperX`: more exact word timing, and who-said-what labels when the `HF_TOKEN` environment variable is set.
+- `-WithWhisperX`: more exact word timing, and who-said-what labels when a Hugging Face token is saved (setup wizard).
 - `-WithLipSync`: MuseTalk re-syncs a single host's lips to the narration (tick **Lip-sync**). Slow on a 4 GB card.
 - **Download + index (YouTube)** (Analyze tab) downloads your own videos into `workspace\episodes` and indexes them.
 - A **music bed** set in the Brand kit plays under every video, lowered while someone speaks.
@@ -92,10 +97,25 @@ The original `workspace` folder is the first profile, "Main"; new profiles live 
 
 **Simple mode** (top right) shows only Create, Edit recording, Highlights and Publish.
 
+## Setup wizard (first start)
+The first time the app opens, a wizard walks through each optional connection: Claude Code, Higgsfield and vidIQ
+(through claude.ai), Codex, YouTube upload, the Google Drive and Riverside folders, the fal.ai key and Hugging Face
+token, and a first profile. Every step can be skipped. Open it again with **Settings > Setup wizard...**.
+
+## Keys and sign-ins are encrypted on this PC
+- The fal.ai key, the Hugging Face token and each profile's YouTube sign-in file and sign-in are encrypted with
+  Windows DPAPI for the current Windows user (`shared\secrets\*.dat`, `<profile>\secrets\*.dat`). Another Windows
+  account, or a copy of the files on another PC, cannot decrypt them.
+- Keys are typed into a hidden box and handed only to the app's own process; they are not stored in environment
+  variables, profile exports or logs. Older plain-text copies (the `FAL_KEY` user variable, `youtube_*.json`) are
+  moved into encrypted storage and deleted automatically.
+- Claude Code, Codex and claude.ai (Higgsfield, vidIQ) keep their own sign-ins; the app never sees those passwords.
+- DPAPI protects against other accounts and stolen files, not against programs running as you.
+
 ## Settings tab: connect services once
 Each outside service is connected here, once for the whole app: **Connect**, **Disconnect** and **Check all**.
 Higgsfield and vidIQ are connected on claude.ai (the button opens that page) and checked through Claude Code;
-Codex signs in with your ChatGPT plan; YouTube signs in with your Google account; Google Drive and Riverside
+Codex signs in with your ChatGPT plan; YouTube signs in with your Google account (kept encrypted); Google Drive and Riverside
 are folders on this PC. A service that is not connected cannot be ticked for a project or chosen as the
 editor, and every agent prompt names it as unavailable.
 
@@ -144,4 +164,4 @@ published online); `build.py` turns it into the stand-alone `app\guide.html`.
 ## Development
 Edit files in `src/` or `installer.template.ps1`, then run `python build.py`. It runs `tests/run_tests.py`
 (unit tests plus a full prompt-to-video run with stand-ins for the AI models, and a static PowerShell
-syntax check) and only then regenerates the installer.
+syntax check) and only then regenerates `Setup-PodcastStudio.ps1` and `Install-PodcastStudio.cmd` (`cmdwrap.py`).

@@ -27,7 +27,7 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Highlights (clips cut straight from an episode): `python ..\app\highlights.py --lib library --episode <file> --out highlights --count 5 --framing speaker`
 - Who is speaking: `python ..\app\speaker.py <video> --start 10 --seconds 8` (LR-ASD, CPU)
 - Compare local models and set the default: `python ..\app\modelbench.py --workspace . --save`
-- Publish: `python ..\app\publish.py pack --project projects\x`, then `upload` (needs `youtube_client_secret.json` in the workspace)
+- Publish: `python ..\app\publish.py pack --project projects\x`, then `upload` (the YouTube sign-in is kept encrypted in `secrets\`; set it up in Settings)
 - Edit one scene: `python ..\app\scenes.py set|remake|add|delete --project projects\x --index N [--fields-file edit.json]`, then `--stage all`
 - Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
@@ -57,6 +57,7 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `workspace\settings.json`: `"encoder": "auto|cpu|nvenc"`, `"proxies": true|false`, `"model": "<default model>"`.
 
 ## Rules
+- Never read, print, copy or decrypt files in `secrets\` or `..\shared\secrets\` (encrypted keys and sign-ins). Never ask the user to paste a key into chat.
 - Only clone voices of people who have consented.
 - Nothing is uploaded anywhere unless `publish.py upload` is run; uploads default to private.
 - `script.json` scenes: `narration`, `visual` (soundbite | footage | card | still), `query`, `card_text`, `image_prompt`, `source`.

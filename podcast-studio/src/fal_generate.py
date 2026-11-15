@@ -1,6 +1,6 @@
 """Run any fal.ai model (Wan image-to-video, Wan-Animate, LatentSync lip-sync...) and download the video.
 
-Local files are uploaded automatically. Needs the FAL_KEY environment variable.
+Local files are uploaded automatically. Uses the fal.ai key saved (encrypted) in Settings, or FAL_KEY.
 """
 import argparse
 import json
@@ -45,7 +45,11 @@ def main():
     a = ap.parse_args()
 
     if not os.environ.get("FAL_KEY"):
-        fail("FAL_KEY is not set. Use Settings > fal.ai key in the app.")
+        import secretstore
+        key = secretstore.load("fal")
+        if not key:
+            fail("No fal.ai key saved. Add it in Settings (or the setup wizard).")
+        os.environ["FAL_KEY"] = key          # this process only; never written to the user's environment
     import fal_client
 
     args = {}

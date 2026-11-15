@@ -128,23 +128,26 @@ def check_codex(result):
 
 
 def check_youtube(result):
-    token = os.path.join(workspace(), "youtube_token.json")
-    secrets = os.path.join(workspace(), "youtube_client_secret.json")
-    if not os.path.exists(secrets):
+    import json
+
+    import secretstore
+    secretstore.migrate(workspace())
+    client = secretstore.load("youtube_client", workspace())
+    token = secretstore.load("youtube_token", workspace())
+    if not client:
         result["youtube"] = (False, "no sign-in file yet")
         return
-    if not os.path.exists(token):
+    if not token:
         result["youtube"] = (False, "sign-in file saved; not signed in")
         return
     try:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file(token, ["https://www.googleapis.com/auth/youtube.upload"])
+        creds = Credentials.from_authorized_user_info(json.loads(token), ["https://www.googleapis.com/auth/youtube.upload"])
         if not creds.valid and creds.refresh_token:
             creds.refresh(Request())
-            with open(token, "w", encoding="utf-8") as f:
-                f.write(creds.to_json())
-        result["youtube"] = (bool(creds.valid), "signed in" if creds.valid else "sign-in expired")
+            secretstore.save("youtube_token", creds.to_json(), workspace())
+        result["youtube"] = (bool(creds.valid), "signed in (kept encrypted)" if creds.valid else "sign-in expired")
     except ImportError:
         result["youtube"] = (True, "signed in (not re-checked)")
     except Exception as e:  # noqa: BLE001 - revoked or expired token
@@ -164,8 +167,9 @@ def check_folder(result, key, data):
 
 
 def check_fal(result):
-    key = os.environ.get("FAL_KEY")
-    result["fal"] = (bool(key), "key saved (checked when used)" if key else "no key")
+    import secretstore
+    key = secretstore.has("fal") or bool(os.environ.get("FAL_KEY"))
+    result["fal"] = (key, "key saved, encrypted (checked when used)" if key else "no key")
 
 
 def check_ollama(result):
@@ -221,9 +225,14 @@ def clear(service):
     if service in ("drive", "riverside"):
         data["folders"].pop(service, None)
     elif service == "youtube":
-        token = os.path.join(workspace(), "youtube_token.json")
-        if os.path.exists(token):
-            os.remove(token)
+        import secretstore
+        secretstore.clear("youtube_token", workspace())
+        legacy = os.path.join(workspace(), "youtube_token.json")
+        if os.path.exists(legacy):
+            os.remove(legacy)
+    elif service == "fal":
+        import secretstore
+        secretstore.clear("fal")
     elif service not in SERVICES:
         fail(f"Unknown service '{service}'.")
     data["services"][service] = {"connected": False, "detail": "disconnected in Settings",

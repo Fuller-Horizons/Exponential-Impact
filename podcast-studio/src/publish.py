@@ -1,7 +1,7 @@
 """Publish a finished project to YouTube, with a title and description written by the local model.
 
   python publish.py pack   --project P [--model gemma3:4b]   writes publish.json (title, description, tags) + thumbnail.jpg
-  python publish.py upload --project P --secrets client_secret.json [--token token.json]
+  python publish.py upload --project P            (sign-in kept encrypted in <profile>\\secrets)
 
 Upload uses the YouTube Data API with your own Google sign-in. Nothing is uploaded until you run `upload`,
 and the video is private unless publish.json says otherwise. Scheduling ("publish_at") needs privacy "private".
@@ -112,27 +112,39 @@ def upload(project, service, media):
     return data
 
 
-def youtube_service(secrets, token):
-    """Sign in (a browser window opens the first time) and return a YouTube API client."""
+def youtube_service(workspace, secrets=None, token=None):
+    """Sign in (a browser window opens the first time) and return a YouTube API client.
+
+    The Google sign-in file and the remembered sign-in are kept encrypted in <profile>\\secrets (Windows DPAPI).
+    --secrets / --token point at plain files instead (advanced use)."""
+    import json
+
+    import secretstore
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 
+    secretstore.migrate(workspace)
     creds = None
-    if os.path.exists(token):
-        creds = Credentials.from_authorized_user_file(token, SCOPES)
+    saved = read_text(token) if token and os.path.exists(token) else (None if token else secretstore.load("youtube_token", workspace))
+    if saved:
+        creds = Credentials.from_authorized_user_info(json.loads(saved), SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not os.path.exists(secrets):
-                fail("YouTube sign-in file not found. In the Publish tab press 'YouTube sign-in file...' "
+            client = read_text(secrets) if secrets and os.path.exists(secrets) else secretstore.load("youtube_client", workspace)
+            if not client:
+                fail("YouTube sign-in file not found. In Settings (or the setup wizard) press 'YouTube sign-in file...' "
                      "and choose the client_secret JSON from your Google Cloud project.")
             log("Opening your browser to sign in to YouTube...")
-            creds = InstalledAppFlow.from_client_secrets_file(secrets, SCOPES).run_local_server(port=0)
-        with open(token, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
+            creds = InstalledAppFlow.from_client_config(json.loads(client), SCOPES).run_local_server(port=0)
+        if token:
+            with open(token, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+        else:
+            secretstore.save("youtube_token", creds.to_json(), workspace)
     return build("youtube", "v3", credentials=creds)
 
 
@@ -150,8 +162,7 @@ def main():
         return
     if a.action == "login":                 # Settings tab: sign in once, without uploading anything
         workspace = os.path.dirname(os.path.dirname(project)) if os.path.basename(os.path.dirname(project)) == "projects" else project
-        youtube_service(a.secrets or os.path.join(workspace, "youtube_client_secret.json"),
-                        a.token or os.path.join(workspace, "youtube_token.json"))
+        youtube_service(workspace, a.secrets, a.token)
         log("YOUTUBE: signed in")
         return
     final = os.path.join(project, "final.mp4")
@@ -159,10 +170,8 @@ def main():
         fail("This project has no finished video yet.")
     request_body(load(project))                       # check the settings before asking anyone to sign in
     workspace = os.path.dirname(os.path.dirname(project))
-    secrets = a.secrets or os.path.join(workspace, "youtube_client_secret.json")
-    token = a.token or os.path.join(workspace, "youtube_token.json")
     from googleapiclient.http import MediaFileUpload
-    upload(project, youtube_service(secrets, token), MediaFileUpload(final, chunksize=8 * 1024 * 1024, resumable=True))
+    upload(project, youtube_service(workspace, a.secrets, a.token), MediaFileUpload(final, chunksize=8 * 1024 * 1024, resumable=True))
 
 
 if __name__ == "__main__":

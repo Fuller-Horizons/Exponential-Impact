@@ -1104,6 +1104,85 @@ def powershell_names_lint():
 
 
 @test
+def secrets_kept_encrypted():
+    import connections
+    import profiles
+    import secretstore
+    ws = os.path.join(WORK, "secret-profile")
+    os.makedirs(ws, exist_ok=True)
+    env = dict(ENV, PSTUDIO_WORKSPACE=ws)
+    env.pop("FAL_KEY", None)
+    # set reads the value from standard input, never from the command line
+    out = subprocess.run([PY, os.path.join(SRC, "secretstore.py"), "set", "--name", "fal"], input="fal-key-123\n",
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr
+    stored = open(secretstore.path("fal"), encoding="ascii").read()
+    assert stored.startswith(("dpapi1:", "plain1:")) and "fal-key-123" not in stored
+    assert secretstore.unprotect(stored) == "fal-key-123"
+    assert "yes" in sh(PY, os.path.join(SRC, "secretstore.py"), "has", "--name", "fal", env=env)
+    found = {}
+    os.environ.pop("FAL_KEY", None)
+    connections.check_fal(found)
+    assert found["fal"][0], found
+    sh(PY, os.path.join(SRC, "secretstore.py"), "clear", "--name", "fal", env=env)
+    assert "no" in sh(PY, os.path.join(SRC, "secretstore.py"), "has", "--name", "fal", env=env)
+    # old plain-text YouTube files move into encrypted storage and the plain copies are deleted
+    for name, body in (("youtube_client_secret.json", '{"installed": {"client_id": "abc"}}'),
+                       ("youtube_token.json", '{"token": "t", "refresh_token": "r"}')):
+        with open(os.path.join(ws, name), "w", encoding="utf-8") as f:
+            f.write(body)
+    moved = secretstore.migrate(ws)
+    assert set(moved) == {"youtube_client_secret.json", "youtube_token.json"}, moved
+    assert not any(os.path.exists(os.path.join(ws, n)) for n in ("youtube_client_secret.json", "youtube_token.json"))
+    assert "abc" in secretstore.load("youtube_client", ws) and os.path.exists(os.path.join(ws, "secrets", "youtube_token.dat"))
+    # a profile export never carries sign-ins
+    reg = profiles.registry()
+    reg["profiles"]["SecretShow"] = ws
+    profiles.save_registry(reg)
+    zpath = os.path.join(WORK, "secret-export.zip")
+    profiles.export("SecretShow", zpath)
+    import zipfile
+    assert not any("secret" in n or "token" in n for n in zipfile.ZipFile(zpath).namelist())
+    reg["profiles"].pop("SecretShow")
+    profiles.save_registry(reg)
+    # the app never writes keys to the user's environment variables any more
+    gui = open(os.path.join(SRC, "PodcastStudio.ps1"), encoding="utf-8").read()
+    sets = [line for line in gui.splitlines() if "SetEnvironmentVariable('FAL_KEY'" in line]
+    assert sets and all("$null" in line for line in sets), sets
+    assert "youtube_client_secret.json') -Force" not in gui and "ProtectedData]::Protect(" in gui
+    assert "PodcastStudio.v1" in gui and secretstore.ENTROPY == b"PodcastStudio.v1", "PowerShell and Python must agree"
+
+
+@test
+def one_file_installer_cmd():
+    sys.path.insert(0, os.path.dirname(HERE))
+    import cmdwrap
+    sample = "Write-Host 'caf\u00e9'\r\n$x = 1\r\n".encode("utf-8")
+    cmd = cmdwrap.make(sample)
+    head = cmd[:cmd.index(cmdwrap.MARKER)]
+    head.decode("ascii")                                   # the batch part is plain ASCII
+    assert not cmd.startswith(b"\xef\xbb\xbf"), "a BOM breaks the first batch line"
+    assert b"\n" not in head.replace(b"\r\n", b""), "batch lines must end in CRLF"
+    assert cmd.count(cmdwrap.MARKER) == 1 and cmdwrap.extract(cmd) == sample
+    text = head.decode("ascii")
+    assert "%*" in text and "-ExecutionPolicy Bypass -File" in text and "pause" in text
+    assert "'#'+'PS1BEGIN'" in text and "%~f0" in text
+    built = os.path.join(os.path.dirname(HERE), "Install-PodcastStudio.cmd")
+    setup = os.path.join(os.path.dirname(HERE), "Setup-PodcastStudio.ps1")
+    if os.path.exists(built) and os.path.exists(setup):     # the shipped pair must match
+        assert cmdwrap.extract(open(built, "rb").read()) == open(setup, "rb").read()[3:]
+
+
+@test
+def setup_wizard_is_wired():
+    gui = open(os.path.join(SRC, "PodcastStudio.ps1"), encoding="utf-8").read()
+    for needle in ("function Show-SetupWizard", "'Setup wizard...'", "setup-done.json", "Check 'setup wizard walks every step'",
+                   "Check 'secrets are encrypted (DPAPI) and readable by Python'"):
+        assert needle in gui, needle
+    assert "-not (Test-Path $script:SetupDoneFile) -and -not $script:Smoke" in gui, "first start must open the wizard"
+
+
+@test
 def app_smoke_test_is_wired():
     gui = open(os.path.join(SRC, "PodcastStudio.ps1"), encoding="utf-8").read()
     runner = open(os.path.join(SRC, "Test-PodcastStudio.ps1"), encoding="utf-8").read()

@@ -23,7 +23,7 @@ SETUP_FILES = ("brand.json", "style-bible.md", "house-rules.md", "settings.json"
 SETUP_DIRS = ("voice",)
 SUBFOLDERS = ("analysis", "voice", "scripts", "clips", "output", "frames", "projects", "library", "episodes",
               "highlights", "music", "assets")
-NEVER_EXPORT = ("youtube_token.json", "youtube_client_secret.json")      # sign-ins stay on this PC
+NEVER_EXPORT = ("youtube_token.json", "youtube_client_secret.json", "secrets")   # sign-ins stay on this PC
 
 
 def registry():

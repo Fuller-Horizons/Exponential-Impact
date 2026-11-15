@@ -232,6 +232,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
       <div class="col">
         <h3>Once, after installing</h3>
         <ol>
+          <li><b>Setup wizard.</b> It opens by itself the first time. Connect what you use; skip the rest.</li>
           <li><b>Voice clone tab.</b> Paste an episode link or pick a file, set a start time, and press Extract sample.</li>
           <li><b>Create tab.</b> Choose your episode folder and press Index footage.</li>
           <li><b>Analyze tab.</b> Press Build style bible (local).</li>
@@ -283,6 +284,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
       <li><a href="#uc-rules">Make a correction stick</a></li>
       <li><a href="#uc-profiles">Set up a show (profile)</a></li>
       <li><a href="#uc-simple">Simple mode</a></li>
+      <li><a href="#uc-wizard">Setup wizard and secure keys</a></li>
       <li><a href="#uc-connect">Connect a service</a></li>
       <li><a href="#uc-riverside">Import a Riverside session</a></li>
       <li><a href="#uc-services">Switch on a service</a></li>
@@ -295,7 +297,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
         <span class="where">Once, after installing</span>
         <h3>Set up the studio</h3>
         <ol>
-          <li>Open <b>Podcast Studio</b> from the desktop shortcut.</li>
+          <li>Open <b>Podcast Studio</b> from the desktop shortcut. The <b>setup wizard</b> opens the first time (see below); skip any step you do not need.</li>
           <li><b>Voice clone</b> tab: paste an episode link or press <b>Browse...</b>, set <b>Start (MM:SS)</b> and 8 to 15 <b>Seconds</b>, then press <b>Extract sample</b>. Press <b>Play sample</b> to check it.</li>
           <li><b>Create</b> tab: next to <b>Episode folder</b> press <b>Browse...</b>, choose the folder of episode videos, then press <b>Index footage</b>.</li>
           <li><b>Analyze</b> tab: press <b>Build style bible (local)</b>.</li>
@@ -492,6 +494,22 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
         <p class="aside">The app remembers your choice. Nothing is lost while tabs are hidden.</p>
       </article>
 
+      <article class="case" id="uc-wizard">
+        <span class="where">First start · or Settings tab › Setup wizard...</span>
+        <h3>Walk through the connections</h3>
+        <ol>
+          <li><b>Claude Code:</b> press <b>Sign in to Claude Code</b>, type <code>/login</code> if asked, close the window, press <b>Check</b>.</li>
+          <li><b>Higgsfield and vidIQ:</b> press <b>Open claude.ai connectors</b>, connect them there, then <b>Check</b>.</li>
+          <li><b>Codex:</b> only if installed with <code>-WithCodex</code>. Press <b>Sign in to Codex</b>, then <b>Check</b>.</li>
+          <li><b>YouTube:</b> in Google Cloud Console create an OAuth <b>Desktop app</b> client for YouTube Data API v3 and download its JSON. Press <b>Choose sign-in file...</b>, then <b>Sign in (browser)</b>. Delete the downloaded JSON afterwards.</li>
+          <li><b>Folders:</b> choose a Google Drive for desktop folder and the folder you download Riverside tracks into.</li>
+          <li><b>Cloud keys:</b> <b>Set fal.ai key...</b> and <b>Set Hugging Face token...</b> open a hidden-text box.</li>
+          <li><b>Your show:</b> type a name and press <b>Create profile</b>, or keep <b>Main</b>.</li>
+          <li>Press <b>Check all</b>, then <b>Finish</b>.</li>
+        </ol>
+        <p class="aside">Keys and YouTube sign-ins are encrypted with Windows (DPAPI) for your Windows account on this PC only. They never go into environment variables, profile exports or logs, and old plain-text copies are moved in and deleted. Claude Code, Codex and claude.ai keep their own sign-ins; the app never sees those passwords.</p>
+      </article>
+
       <article class="case" id="uc-connect">
         <span class="where">Settings tab · once per PC</span>
         <h3>Connect an outside service</h3>
@@ -581,7 +599,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
     <div class="group">
       <h3>If something goes wrong</h3>
       <dl class="fix">
-        <div><dt>The install stops with an error</dt><dd>Fix what it names and run the same command again. Finished steps are skipped.</dd></div>
+        <div><dt>"Windows protected your PC" when opening the installer</dt><dd>Press More info, then Run anyway. The file is not code-signed; it is plain text you can open in Notepad first.</dd></div>
+        <div><dt>The install stops with an error</dt><dd>Fix what it names and run the installer again. Finished steps are skipped.</dd></div>
         <div><dt>A stage fails while making a video</dt><dd>Press 2. Approve + make video again. Finished work is kept.</dd></div>
         <div><dt>"No local chat model is installed"</dt><dd>Open PowerShell and run <code>ollama pull gemma3:4b</code>, or pick another model in the Create tab.</dd></div>
         <div><dt>Out of graphics memory</dt><dd>Close other programs that use the GPU and untick AI stills.</dd></div>
@@ -595,7 +614,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
 <script>
 (function () {
   var CHECK = 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\Downloads\\Setup-PodcastStudio.ps1" -CheckOnly';
-  var INSTALL = 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\Downloads\\Setup-PodcastStudio.ps1"';
+  var INSTALL = '%USERPROFILE%\\Downloads\\Install-PodcastStudio.cmd';
   var GROUPS = [
     { title: 'Before you install', items: [
       ['pc', 'PC has an NVIDIA graphics card (4 GB or more) and 16 GB of memory'],
@@ -605,14 +624,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
       ['consent', 'Everyone whose voice will be cloned has agreed']
     ]},
     { title: 'Install', items: [
-      ['save', 'Save Setup-PodcastStudio.ps1 to your Downloads folder'],
-      ['check', 'Run the check-only command in a normal PowerShell window', 'It reports GPU, memory, disk and network. Nothing is installed.', CHECK],
-      ['install', 'Run the install command', 'Expect 20 to 40 minutes. Leave the window open.', INSTALL],
+      ['save', 'Save Install-PodcastStudio.cmd to your Downloads folder', 'Optional: also save Setup-PodcastStudio.ps1 for the check-only run below.'],
+      ['check', 'Optional: run the check-only command in a normal PowerShell window', 'It reports GPU, memory, disk and network. Nothing is installed.', CHECK],
+      ['install', 'Double-click Install-PodcastStudio.cmd', 'If Windows warns, press More info > Run anyway. Or paste the line below into Win+R. Expect 20 to 40 minutes; leave the window open.', INSTALL],
       ['passed', 'The window ends with "self-test passed"'],
       ['logs', 'Keep the three log files', 'PodcastStudio\\logs\\install-<time>.log, selftest.json and gui-smoke.json. Send them if anything failed.']
     ]},
     { title: 'Set up once', items: [
       ['open', 'Open Podcast Studio from the desktop shortcut'],
+      ['wizard', 'Go through the setup wizard', 'Connect only what you use. Keys are encrypted for your Windows account.'],
       ['voice', 'Voice clone tab: extract an 8 to 15 second voice sample', 'Choose a stretch with one speaker and no music. Press Play sample to check it.'],
       ['index', 'Create tab: choose the episode folder and press Index footage', 'This transcribes every episode. A 45-minute episode takes a few minutes.'],
       ['bible', 'Analyze tab: press Build style bible (local)'],

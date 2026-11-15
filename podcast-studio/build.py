@@ -16,7 +16,7 @@ order = ["PodcastStudio.ps1", "Test-PodcastStudio.ps1", "common.py", "llm.py", "
          "subs.py", "brand.py", "speaker.py", "lipsync.py", "tts.py", "pipeline.py", "scenes.py", "highlights.py",
          "assemble.py", "qa.py", "stylebible.py", "modelbench.py", "publish.py", "recording.py", "repurpose.py",
          "ytimport.py", "services.py", "connections.py", "multitrack.py", "profiles.py", "captions.py",
-         "extract_voice.py", "fal_generate.py", "selftest.py", "CLAUDE.md"]
+         "extract_voice.py", "fal_generate.py", "selftest.py", "secretstore.py", "CLAUDE.md"]
 missing = {p.name for p in (here / "src").iterdir() if p.is_file()} - set(order)
 assert not missing, f"not embedded: {missing}"
 blocks = []
@@ -49,5 +49,13 @@ tpl = (here / "installer.template.ps1").read_text(encoding="utf-8")
 assert tpl.count("#__FILES__") == 1 and tpl.count("#__BINARIES__") == 1
 out = tpl.replace("#__FILES__", "\n".join(blocks)).replace("#__BINARIES__", "\n".join(binaries))
 # Windows PowerShell 5.1 reads BOM-less files as ANSI; write UTF-8 with BOM and CRLF.
-(here / "Setup-PodcastStudio.ps1").write_bytes(b"\xef\xbb\xbf" + out.replace("\n", "\r\n").encode("utf-8"))
+ps1 = out.replace("\n", "\r\n").encode("utf-8")
+(here / "Setup-PodcastStudio.ps1").write_bytes(b"\xef\xbb\xbf" + ps1)
 print("wrote Setup-PodcastStudio.ps1", len(out), "chars")
+
+# Install-PodcastStudio.cmd: the same installer as one double-click file (see cmdwrap.py)
+sys.path.insert(0, str(here))
+import cmdwrap  # noqa: E402
+
+(here / "Install-PodcastStudio.cmd").write_bytes(cmdwrap.make(ps1))
+print("wrote Install-PodcastStudio.cmd")
