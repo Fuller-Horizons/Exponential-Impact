@@ -15,7 +15,7 @@ if "--no-test" not in sys.argv:  # never ship an installer whose tests fail
 order = ["PodcastStudio.ps1", "Test-PodcastStudio.ps1", "common.py", "llm.py", "library.py", "visuals.py",
          "subs.py", "brand.py", "speaker.py", "lipsync.py", "tts.py", "pipeline.py", "scenes.py", "highlights.py",
          "assemble.py", "qa.py", "stylebible.py", "modelbench.py", "publish.py", "recording.py", "repurpose.py",
-         "ytimport.py", "captions.py",
+         "ytimport.py", "services.py", "captions.py",
          "extract_voice.py", "fal_generate.py", "selftest.py", "CLAUDE.md"]
 missing = {p.name for p in (here / "src").iterdir() if p.is_file()} - set(order)
 assert not missing, f"not embedded: {missing}"

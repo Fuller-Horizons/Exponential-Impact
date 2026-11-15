@@ -14,6 +14,7 @@
   Options: -Root D:\PodcastStudio  -Model gemma3:4b  -SkipModels  -SkipClaude  -CpuOnly  -WithStills  -Upgrade
            -CheckOnly   (look at this PC and the network, install nothing)
            -WithWhisperX  optional: more exact word timing (and who-said-what if HF_TOKEN is set). About 5 GB more.
+           -WithCodex     optional: OpenAI Codex as a second editor (signs in with your ChatGPT plan).
            -WithLipSync   optional: MuseTalk lip-sync in its own Python 3.10 environment. About 10 GB more, slow
                           on a 4 GB card, and the least-tested part of this installer.
   A full log of every run is saved to <Root>\logs\install-<time>.log.
@@ -30,7 +31,8 @@ param(
     [switch]$Upgrade,
     [switch]$CheckOnly,
     [switch]$WithWhisperX,
-    [switch]$WithLipSync
+    [switch]$WithLipSync,
+    [switch]$WithCodex
 )
 # Pinned upstream versions (verified to resolve together for Windows / Python 3.11)
 $Pins = @{
@@ -326,6 +328,16 @@ if ($WithLipSync) {
     else { Warn 'MuseTalk did not install completely - lip-sync stays off. Everything else is unaffected.' }
 }
 
+if ($WithCodex) {
+    Step 'Codex (optional second editor, uses your ChatGPT plan)'
+    if (Has 'npm') {
+        if (Native 'npm i -g @openai/codex' { & npm install -g '@openai/codex' --silent } -Soft) {
+            Refresh-Path
+            Ok 'Codex installed. Run "codex" once and choose "Sign in with ChatGPT".'
+        } else { Warn 'Codex did not install. Claude Code stays the editor.' }
+    } else { Warn 'npm is missing, so Codex was not installed.' }
+}
+
 # ------------------------------------------------------------------ 8. app files
 Step 'Writing Podcast Studio app'
 $appDir = Join-Path $Root 'app'
@@ -405,13 +417,36 @@ function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
     [System.IO.File]::AppendAllText($file, "- $text`n")
     return $true
 }
-function Start-Claude([string]$dir, [string]$promptFile) {
-    # Opens Claude Code in its own window with the prompt read from a file (no quoting problems)
-    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.'; return $false }
-    $safe = $promptFile -replace "'", "''"
-    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "claude (Get-Content -Raw -LiteralPath '$safe')"
+function Get-ServicesBlock([string]$project, [string]$editor) {
+    # The project's service rules (which outside services are allowed, caps, spend so far), added to every agent prompt
+    if (-not $project -or -not (Test-Path $Py)) { return '' }
+    $text = & $Py -u (Join-Path $App 'services.py') block --project $project --editor $editor 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) { return '' }
+    return $text
+}
+function Start-Agent([string]$dir, [string]$promptFile, [string]$editor = 'claude', [string]$project = '') {
+    # Opens Claude Code or Codex in its own window with the prompt read from a file (no quoting problems)
+    $exe = if ($editor -eq 'codex') { 'codex' } else { 'claude' }
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+        if ($editor -eq 'codex') { Msg 'Codex is not installed. Re-run the installer with -WithCodex, then run "codex" once and choose "Sign in with ChatGPT".' }
+        else { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.' }
+        return $false
+    }
+    $run = $promptFile
+    $lighter = ''
+    if ($project) {
+        $rules = Get-ServicesBlock $project $editor
+        $run = [System.IO.Path]::ChangeExtension($promptFile, '.run.txt')
+        [System.IO.File]::WriteAllText($run, [System.IO.File]::ReadAllText($promptFile) + "`n" + $rules)
+        # No paid service allowed: ask Claude Code not to load the account's connectors (less memory). This setting
+        # is reported by third parties, not confirmed by Anthropic; if it is ignored the prompt still forbids them.
+        if ($editor -eq 'claude' -and $rules -notmatch 'allowed, up to') { $lighter = "`$env:ENABLE_CLAUDEAI_MCP_SERVERS='false'; " }
+    }
+    $safe = $run -replace "'", "''"
+    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "$lighter$exe (Get-Content -Raw -LiteralPath '$safe')"
     return $true
 }
+function Start-Claude([string]$dir, [string]$promptFile, [string]$project = '') { return (Start-Agent $dir $promptFile 'claude' $project) }
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
 $ImageFilter = 'Image|*.png;*.jpg;*.jpeg;*.webp|All files|*.*'
@@ -767,8 +802,11 @@ $rTight.Text = 'Remove pauses here first'; $rTight.Checked = $true
 $rTight.Location = New-Object System.Drawing.Point(662, 47); $rTight.Size = New-Object System.Drawing.Size(250, 24)
 $tR.Controls.Add($rTight)
 $rPrompt = Add-Text $tR 150 165 760 '' 175
-$lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
+$lr = Add-Label $tR 'What the editor will be asked (you can edit it)' 10 165 135
 $lr.Size = New-Object System.Drawing.Size(135, 80)
+Add-Label $tR 'Editor' 10 255 135 | Out-Null
+$rEditor = Add-Combo $tR 10 280 135 @('Claude Code', 'Codex (ChatGPT)')
+function Get-Editor { if ($rEditor.SelectedIndex -eq 1) { return 'codex' } else { return 'claude' } }
 
 function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
 function Get-RecordingProject {
@@ -791,14 +829,15 @@ $b.Add_Click({
     if ($rTight.Checked) { $argv += '--tighten' }
     Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' $argv { Load-RecordingPrompt }
 })
-$b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
+$b = Add-Button $tR '2. Edit with the editor' 380 85 200
 $b.Add_Click({
     $proj = Get-RecordingProject
     if (-not $proj -or -not (Test-Path (Join-Path $proj 'assets\raw.json'))) { Msg 'Press "1. Prepare" first.'; return }
     if (-not $rPrompt.Text.Trim()) { Load-RecordingPrompt }
     $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
     [System.IO.File]::WriteAllText($pf, ($rPrompt.Text -replace "`r`n", "`n"))
-    if (Start-Claude $Kit $pf) { Log "Claude Code opened in $Kit. Its window shows the edit; answer its questions there." }
+    $ed = Get-Editor
+    if (Start-Agent $Kit $pf $ed $proj) { Log "$([string]$rEditor.SelectedItem) opened in $Kit. Its window shows the edit; answer its questions there." }
 })
 $b = Add-Button $tR 'Open project folder' 590 85 160
 $b.Add_Click({ $proj = Get-RecordingProject; if ($proj -and (Test-Path $proj)) { Start-Process explorer.exe $proj } else { Msg 'Nothing prepared yet.' } })
@@ -1137,12 +1176,119 @@ $b.Add_Click({
     [System.IO.File]::WriteAllText($pf, ("Read script.txt, then social/linkedin.txt, social/x-thread.txt and social/carousel.txt. " +
         "Rewrite the three posts so they are sharper and sound like this show, keeping every claim true to script.txt. " +
         "Follow every rule in $RulesFile if it exists. Save over the same three files and show me what changed. Do not post anything anywhere."))
-    [void](Start-Claude $dir $pf)
+    [void](Start-Claude $dir $pf $dir)
 })
 $nP = Add-Label $tP ('Nothing leaves this PC until you press Upload and confirm. Videos upload as private unless you change Privacy. ' +
     'One-time setup: in Google Cloud Console create a project, enable "YouTube Data API v3", create an OAuth client of type "Desktop app", ' +
     'download its JSON file and choose it with "YouTube sign-in file...". Social posts are drafts in the project''s social folder; nothing is posted.') 150 360 760
 $nP.Size = New-Object System.Drawing.Size(760, 80)
+
+# ================================================================ TAB: Services (optional, per project; everything works with all off)
+$tV = New-Tab 'Services'
+Add-Label $tV 'Settings for' 10 12 | Out-Null
+$vScope = Add-Combo $tV 150 12 250 @('the Create tab project', 'the Edit recording project')
+$vWhich = Add-Label $tV '' 410 12 380
+$b = Add-Button $tV 'Load' 800 10 110
+$b.Add_Click({ Load-Services $false })
+$vHigg = New-Object System.Windows.Forms.CheckBox
+$vHigg.Text = 'Higgsfield'; $vHigg.Location = New-Object System.Drawing.Point(150, 50); $vHigg.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vHigg)
+Add-Label $tV 'cap' 275 50 30 | Out-Null
+$vHiggCap = Add-Text $tV 305 50 55 '200'
+Add-Label $tV 'credits. Generated B-roll, dubbing, upscaling, reframing.' 365 50 545 | Out-Null
+$vVid = New-Object System.Windows.Forms.CheckBox
+$vVid.Text = 'vidIQ'; $vVid.Location = New-Object System.Drawing.Point(150, 85); $vVid.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vVid)
+Add-Label $tV 'cap' 275 85 30 | Out-Null
+$vVidCap = Add-Text $tV 305 85 55 '100'
+Add-Label $tV 'credits. Topic ideas, title scores, thumbnails, music beds.' 365 85 545 | Out-Null
+$vDrive = New-Object System.Windows.Forms.CheckBox
+$vDrive.Text = 'Google Drive'; $vDrive.Location = New-Object System.Drawing.Point(150, 120); $vDrive.Size = New-Object System.Drawing.Size(120, 24)
+$tV.Controls.Add($vDrive)
+$vFolder = Add-Text $tV 275 120 515
+$b = Add-Button $tV 'Drive folder...' 800 118 110
+$b.Add_Click({ $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq 'OK') { $vFolder.Text = $d.SelectedPath } })
+$b = Add-Button $tV 'Save for this project' 150 158 180
+$b.Add_Click({ [void](Save-Services $false) })
+$b = Add-Button $tV 'Save as my default' 340 158 160
+$b.Add_Click({ [void](Save-Services $true) })
+$vSpent = Add-Label $tV '' 510 162 400
+
+function Get-ServicesProject([bool]$quiet) {
+    if ($vScope.SelectedIndex -eq 1) {
+        $p = Get-RecordingProject
+        if (-not $p -or -not (Test-Path (Join-Path $p 'assets'))) { if (-not $quiet) { Msg 'Prepare the recording in the Edit recording tab first.' }; return $null }
+        return $p
+    }
+    return (Get-Project)
+}
+function Load-Services([bool]$quiet) {
+    $p = Get-ServicesProject $quiet; if (-not $p) { return }
+    $vWhich.Text = Split-Path $p -Leaf
+    $raw = & $Py -u (Join-Path $App 'services.py') json --project $p 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $raw.Trim()) { if (-not $quiet) { Msg 'Could not read the service settings.' }; return }
+    $c = $raw | ConvertFrom-Json
+    $vHigg.Checked = [bool]$c.services.higgsfield; $vVid.Checked = [bool]$c.services.vidiq; $vDrive.Checked = [bool]$c.services.drive
+    $vHiggCap.Text = [string]$c.caps.higgsfield; $vVidCap.Text = [string]$c.caps.vidiq; $vFolder.Text = [string]$c.drive_folder
+    $vSpent.Text = "Used so far: Higgsfield $($c.spent.higgsfield), vidIQ $($c.spent.vidiq) credits"
+}
+function Save-Services([bool]$asDefault) {
+    $p = Get-ServicesProject $false; if (-not $p) { return $false }
+    foreach ($cap in $vHiggCap.Text, $vVidCap.Text) { if ($cap -notmatch '^\d+$') { Msg 'Credit caps must be whole numbers.'; return $false } }
+    $on = @(); $off = @()
+    if ($vHigg.Checked) { $on += 'higgsfield' } else { $off += 'higgsfield' }
+    if ($vVid.Checked) { $on += 'vidiq' } else { $off += 'vidiq' }
+    if ($vDrive.Checked) { $on += 'drive' } else { $off += 'drive' }
+    $argv = @('-u', (Join-Path $App 'services.py'), 'set', '--project', $p, '--cap-higgsfield', $vHiggCap.Text,
+        '--cap-vidiq', $vVidCap.Text, '--drive-folder', $vFolder.Text)
+    if ($on) { $argv += @('--on') + $on }
+    if ($off) { $argv += @('--off') + $off }
+    if ($asDefault) { $argv += '--default' }
+    $out = & $Py @argv 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg ("Could not save: " + $out.Trim()); return $false }
+    Log ("Services saved for $(Split-Path $p -Leaf)" + $(if ($asDefault) { ' and as your default for new projects.' } else { '.' }))
+    Load-Services $true
+    return $true
+}
+$vScope.Add_SelectedIndexChanged({ Load-Services $true })
+
+$hdr = Add-Label $tV 'Optional tasks for the Create tab project. Each opens Claude Code; it tells you the cost and waits for your yes before any paid step.' 10 205 900
+$hdr.Size = New-Object System.Drawing.Size(900, 24)
+function Start-ServiceTask([string]$kind, [string[]]$extra = @()) {
+    $dir = Get-Project; if (-not $dir) { return }
+    $out = & $Py -u (Join-Path $App 'services.py') task --project $dir --kind $kind @extra 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Msg (($out -split "`n" | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1) -replace '^ERROR:\s*', ''); return }
+    $taskFile = ($out -split "`n" | Where-Object { $_ -match '^TASK: ' } | Select-Object -First 1) -replace '^TASK:\s*', ''
+    if (Start-Claude $dir $taskFile.Trim()) { Log "Claude Code opened for the $kind task. Answer its questions in its window." }
+}
+$b = Add-Button $tV 'Ideas (vidIQ)' 150 235 160
+$b.Add_Click({ Start-ServiceTask 'ideas' })
+$b = Add-Button $tV 'Title + thumbnail (vidIQ)' 320 235 200
+$b.Add_Click({ Start-ServiceTask 'package' })
+$b = Add-Button $tV 'Music bed (vidIQ)' 530 235 160
+$b.Add_Click({ Start-ServiceTask 'music' })
+Add-Label $tV 'Scene' 150 275 45 | Out-Null
+$vScene = Add-Text $tV 198 275 40 '1'
+$b = Add-Button $tV 'Generated B-roll (Higgsfield)' 245 273 220
+$b.Add_Click({ Start-ServiceTask 'broll' @('--scene', $vScene.Text) })
+$vLang = Add-Combo $tV 480 275 130 @('spa Spanish', 'por Portuguese', 'fra French', 'deu German', 'ita Italian', 'hin Hindi', 'jpn Japanese', 'kor Korean', 'cmn Chinese', 'ara Arabic', 'rus Russian', 'tur Turkish', 'pol Polish', 'ind Indonesian', 'fil Filipino', 'swe Swedish', 'fin Finnish', 'eng English')
+$b = Add-Button $tV 'Dub (Higgsfield)' 620 273 150
+$b.Add_Click({ Start-ServiceTask 'dub' @('--language', ([string]$vLang.SelectedItem).Substring(0, 3)) })
+$b = Add-Button $tV 'Copy to Drive folder' 150 313 180
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py 'Copy finished files to the Drive folder' 'services.py' @('drive', '--project', $dir)
+})
+$b = Add-Button $tV 'Open spending log' 340 313 160
+$b.Add_Click({
+    $p = Get-ServicesProject $false; if (-not $p) { return }
+    $f = Join-Path $p 'services-log.md'
+    if (Test-Path $f) { Start-Process notepad.exe $f } else { Msg 'No paid service has been used for this project yet.' }
+})
+$nV = Add-Label $tV ('Everything in Podcast Studio works with all of these off, which is the default. Higgsfield and vidIQ are connected to your Claude account, so ' +
+    'only Claude Code can use them; Codex cannot. Caps are instructions Claude follows and logs against, not limits the services enforce. ' +
+    'Uploading to a service sends your footage to that company.') 10 355 900
+$nV.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab 'Analyze'
@@ -1440,7 +1586,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 9) "expected 9 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 10) "expected 10 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1576,6 +1722,26 @@ Check 'recording tab and house rules' {
     Expect ($text -match '# House rules' -and $text -match '- Never open with a greeting\.' -and $text -match '- Keep hooks under ten words\.') 'rules file content is wrong'
     Show-RuleDialog
     'slug, project path, type and rules file'
+}
+Check 'services are off by default and save per project' {
+    $vScope.SelectedIndex = 0
+    Load-Services $true
+    Expect (-not $vHigg.Checked -and -not $vVid.Checked -and -not $vDrive.Checked) 'services must start switched off'
+    $vVid.Checked = $true; $vVidCap.Text = '40'
+    Expect (Save-Services $false) 'saving failed'
+    $saved = [System.IO.File]::ReadAllText((Join-Path $smokeDir 'services.json')) | ConvertFrom-Json
+    Expect ($saved.services.vidiq -and -not $saved.services.higgsfield -and $saved.caps.vidiq -eq 40) 'saved switches are wrong'
+    $rules = Get-ServicesBlock $smokeDir 'claude'
+    Expect ($rules -match 'vidIQ: allowed, up to 40 credits' -and $rules -match 'Higgsfield: OFF') 'prompt rules do not follow the switches'
+    Expect ((Get-ServicesBlock $smokeDir 'codex') -match 'only connected to Claude') 'Codex must be told vidIQ is not available to it'
+    $vVid.Checked = $false
+    [void](Save-Services $false)
+    $out = & $Py -u (Join-Path $App 'services.py') task --project $smokeDir --kind ideas 2>&1 | Out-String
+    Expect ($LASTEXITCODE -ne 0 -and $out -match 'is off for this project') 'a task must refuse while its service is off'
+    $rEditor.SelectedIndex = 1
+    Expect ((Get-Editor) -eq 'codex') 'editor box does not map to Codex'
+    $rEditor.SelectedIndex = 0
+    'off by default, saved per project, rules reach the prompt, tasks refuse when off'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'
@@ -4078,7 +4244,7 @@ $files['scenes.py'] = @'
 """Scene editor backend: change, re-make, add or delete one scene without redoing the rest.
 
   python scenes.py set    --project P --index 3 --fields-file edit.json   (fields: narration, visual, query,
-                                                                           card_text, image_prompt, layout)
+                                                                           card_text, image_prompt, layout, clip)
   python scenes.py remake --project P --index 3        (new voice take / next best footage / new still)
   python scenes.py add    --project P --index 3        (insert a card scene after scene 3)
   python scenes.py delete --project P --index 3
@@ -4172,6 +4338,19 @@ def main():
         for key in ("narration", "query", "card_text", "image_prompt"):
             if key in new:
                 s[key] = " ".join(str(new[key] or "").split())
+        if new.get("clip"):            # a ready-made clip (for example generated B-roll) shown for this scene
+            clip = os.path.abspath(str(new["clip"]))
+            if not os.path.exists(clip):
+                fail(f"Clip not found: {clip}")
+            if s["visual"] == "soundbite":
+                fail("A soundbite scene shows the hosts; choose a narrated scene for a clip.")
+            invalidate(project, n, voice=False)
+            s["visual"], s["source"], s["generated"] = "footage", {"file": clip, "start": 0}, True
+            s["layout"] = "auto"
+            script["edited"] = True
+            save(project, script)
+            log(f"Scene {n} now shows {os.path.basename(clip)} (voice kept)")
+            return
         if "layout" in new:
             layout = str(new["layout"] or "").lower()
             if layout and layout not in FRAMINGS:
@@ -5538,6 +5717,307 @@ def main():
 if __name__ == "__main__":
     main()
 '@
+$files['services.py'] = @'
+"""Optional outside services, switched on per project. Everything in Podcast Studio works with all of them off.
+
+  python services.py show   --project P                       the switches in force for P (defaults + overrides)
+  python services.py set    --project P --on vidiq --off higgsfield [--cap-vidiq 100] [--default]
+  python services.py block  --project P [--editor claude|codex] the rules added to every AI-agent prompt for P
+  python services.py task   --project P --kind ideas|package|music|broll|dub [--scene 3] [--language spa]
+                                                               write a cost-capped task prompt for Claude Code
+  python services.py drive  --project P                       copy the finished files into the Drive folder
+
+Higgsfield and vidIQ are connectors on the user's Claude account, so only Claude (Code) can use them; this app
+never calls them itself. Google Drive is used through the Google Drive for desktop folder on this PC.
+Switched-off services are named in every prompt as not allowed.
+"""
+import argparse
+import datetime
+import os
+import re
+import shutil
+import sys
+
+from common import fail, log, read_json, read_text, studio_root, write_json, write_text
+
+SERVICES = {
+    "higgsfield": {"name": "Higgsfield", "paid": True, "cap": 200,
+                   "what": "generated B-roll video and images, upscaling, reframing, dubbing, virality score"},
+    "vidiq": {"name": "vidIQ", "paid": True, "cap": 100,
+              "what": "topic ideas, keyword research, title scores, thumbnails, music, chapters, stock B-roll"},
+    "drive": {"name": "Google Drive", "paid": False, "cap": 0,
+              "what": "copy finished videos, thumbnails and posts into a Google Drive folder synced to this PC"},
+}
+TASKS = {"ideas": "vidiq", "package": "vidiq", "music": "vidiq", "broll": "higgsfield", "dub": "higgsfield"}
+DUB_LANGUAGES = {"eng": "English", "spa": "Spanish", "por": "Portuguese", "fra": "French", "deu": "German",
+                 "ita": "Italian", "hin": "Hindi", "jpn": "Japanese", "kor": "Korean", "cmn": "Chinese",
+                 "ara": "Arabic", "rus": "Russian", "tur": "Turkish", "pol": "Polish", "ind": "Indonesian",
+                 "fil": "Filipino", "swe": "Swedish", "fin": "Finnish"}
+APP = os.path.dirname(os.path.abspath(__file__))
+
+
+def workspace():
+    return os.path.join(studio_root(), "workspace")
+
+
+def defaults():
+    """Everything off, with conservative credit caps."""
+    return {"services": {k: False for k in SERVICES}, "caps": {k: v["cap"] for k, v in SERVICES.items() if v["paid"]},
+            "drive_folder": ""}
+
+
+def _merge(base, extra):
+    if not isinstance(extra, dict):
+        return base
+    for key in ("services", "caps"):
+        for k, v in (extra.get(key) or {}).items():
+            if k in base[key]:
+                base[key][k] = bool(v) if key == "services" else max(0, int(v))
+    if isinstance(extra.get("drive_folder"), str) and extra["drive_folder"].strip():
+        base["drive_folder"] = extra["drive_folder"].strip()
+    return base
+
+
+def load(project=None):
+    """Settings in force: all-off defaults, then workspace/settings.json "services", then <project>/services.json."""
+    cfg = _merge(defaults(), (read_json(os.path.join(workspace(), "settings.json"), {}) or {}).get("services_default"))
+    if project:
+        cfg = _merge(cfg, read_json(os.path.join(project, "services.json"), {}))
+    return cfg
+
+
+def save(project, cfg, as_default=False):
+    data = {"services": cfg["services"], "caps": cfg["caps"], "drive_folder": cfg["drive_folder"]}
+    if as_default:
+        path = os.path.join(workspace(), "settings.json")
+        settings = read_json(path, {}) or {}
+        settings["services_default"] = data
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_json(path, settings)
+    if project:
+        write_json(os.path.join(project, "services.json"), data)
+
+
+def spent(project):
+    """Credits already logged for this project, per service, from services-log.md."""
+    totals = {k: 0 for k, v in SERVICES.items() if v["paid"]}
+    path = os.path.join(project, "services-log.md")
+    if not os.path.exists(path):
+        return totals
+    for line in read_text(path).splitlines():
+        m = re.match(r"\s*-\s.*?\b(higgsfield|vidiq)\b.*?(\d+(?:\.\d+)?)\s*credits?", line, re.I)
+        if m:
+            totals[m.group(1).lower()] += round(float(m.group(2)))
+    return totals
+
+
+def block(project, editor="claude"):
+    """The service rules added to every AI-agent prompt for this project."""
+    cfg, used = load(project), spent(project)
+    log_path = os.path.join(project, "services-log.md")
+    lines = ["", "Outside services for this project (set in Podcast Studio's Services tab):"]
+    for key, info in SERVICES.items():
+        on = cfg["services"][key]
+        if key == "drive":
+            lines.append(f"- {info['name']}: {'on' if on else 'off'} (Podcast Studio copies files itself; you do not need it).")
+            continue
+        if not on:
+            lines.append(f"- {info['name']}: OFF. Do not use any {info['name']} tool for this project.")
+        elif editor == "codex":
+            lines.append(f"- {info['name']}: on, but its tools are only connected to Claude, not Codex. Do not try to use it.")
+        else:
+            cap = cfg["caps"][key]
+            lines.append(f"- {info['name']}: allowed, up to {cap} credits for this project ({used[key]} already used). "
+                         f"Use it only where it clearly improves the result.")
+    if any(cfg["services"][k] for k in ("higgsfield", "vidiq")) and editor != "codex":
+        lines += [
+            "- Before every paid call, check its cost (Higgsfield: get_cost; vidIQ: the cost in the tool's description), "
+            "tell me, and wait for my yes. Never go over the project's cap.",
+            f"- After every paid call, add one line to {log_path}: \"- <date> <service> <tool>: <N> credits - <what for>\".",
+            "- If a service fails, is out of credits or I say no, carry on without it. Nothing in this project requires it.",
+            "- Uploading footage to a service sends it to that company. Only do it for the task I asked for.",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _require(project, service):
+    cfg = load(project)
+    if not cfg["services"].get(service):
+        fail(f"{SERVICES[service]['name']} is off for this project. Turn it on in the Services tab first.")
+    return cfg
+
+
+def task(project, kind, scene=None, language=None):
+    """Write the prompt for one optional, cost-capped task and return its path."""
+    if kind not in TASKS:
+        fail(f"Unknown task '{kind}'.")
+    service = TASKS[kind]
+    cfg = _require(project, service)
+    cap, used = cfg["caps"][service], spent(project)[service]
+    if used >= cap:
+        fail(f"This project has used {used} of its {cap} {SERVICES[service]['name']} credits. Raise the cap to continue.")
+    name = os.path.basename(project.rstrip("/\\"))
+    pcfg = read_json(os.path.join(project, "project.json"), {}) or {}
+    fmt = pcfg.get("format", "9:16")
+    short = fmt == "9:16"
+    py, app = f'"{sys.executable}"', APP
+    lines = [f"Podcast Studio task for the project folder {project} (project \"{name}\").", ""]
+    if kind == "ideas":
+        topic = read_text(os.path.join(project, "prompt.txt")).strip() if os.path.exists(os.path.join(project, "prompt.txt")) else ""
+        if not topic:
+            fail("Type the video's topic in the Create tab first.")
+        lines += [f"Topic: {topic}", "",
+                  "Use vidIQ to find what is working for this topic right now:",
+                  "1. vidiq_keyword_research (mode research) on the topic's core phrase.",
+                  f"2. vidiq_outliers with that keyword, contentType \"{'short' if short else 'long'}\".",
+                  f"3. Write {os.path.join(project, 'ideas.md')}: five angles for this video, each with a working title, a "
+                  "first line the host could say, the keywords it targets, and the outlier videos that suggest it works "
+                  "(title, channel, views, link).",
+                  "Do not change the outline or anything else. I will choose an angle in Podcast Studio."]
+    elif kind == "package":
+        if not os.path.exists(os.path.join(project, "final.mp4")):
+            fail("Make the video first: packaging needs the finished video.")
+        lines += [f"Read {os.path.join(project, 'script.txt')} and {os.path.join(project, 'publish.json')} if it exists.",
+                  "1. Write five title options in the show's voice (house rules and style bible in the workspace apply).",
+                  f"2. Score each with vidiq_score_title, type \"{'short' if short else 'long'}\".",
+                  f"3. Make one thumbnail with vidiq_generate_thumbnail, orientation \"{'portrait' if short else 'landscape'}\", "
+                  "using the best title and the script as the transcript. Download its imageUrl to "
+                  f"{os.path.join(project, 'thumbnail_vidiq.png')}.",
+                  f"4. Write {os.path.join(project, 'packaging.md')} with the titles, their scores and the thumbnail path.",
+                  f"5. Ask me before putting the chosen title into {os.path.join(project, 'publish.json')} (keep every other field)."]
+    elif kind == "music":
+        bible = os.path.join(workspace(), "style-bible.md")
+        music_dir = os.path.join(workspace(), "music")
+        lines += [f"Make an instrumental music bed for this show with vidIQ's music generation tool. Read {bible} if it "
+                  "exists for the mood. It plays quietly under speech, so: no vocals, steady, not busy, about 60-90 seconds.",
+                  f"Download it into {music_dir} with a short descriptive file name.",
+                  f"Then ask me before setting it as \"music\" in {os.path.join(workspace(), 'brand.json')} (keep every other field)."]
+    elif kind == "broll":
+        script = read_json(os.path.join(project, "script.json"), {}) or {}
+        scenes = script.get("scenes") or []
+        if not scene or not 1 <= scene <= len(scenes):
+            fail(f"Choose a scene number between 1 and {len(scenes) or '?'} in the Scenes tab.")
+        s = scenes[scene - 1]
+        if s.get("visual") == "soundbite":
+            fail("That scene is a soundbite (the hosts on camera). Choose a narrated scene.")
+        wav = os.path.join(project, "voice", f"scene_{scene:02}.wav")
+        clip = os.path.join(project, "generated", f"scene_{scene:02}.mp4")
+        fields = os.path.join(project, "generated", f"scene_{scene:02}.json")
+        lines += [f"Make generated B-roll for scene {scene}.",
+                  f"- Narration: {s.get('narration', '')}",
+                  f"- Picture idea: {s.get('image_prompt') or s.get('query') or s.get('narration', '')}",
+                  f"- Length: at least the voice line {wav} (measure it with ffprobe), aspect ratio {fmt}.",
+                  "1. Choose a suitable Higgsfield video model (models_explore) and check the cost with get_cost first.",
+                  "2. After I agree, generate it with generate_video. No text, logos or real people's likenesses in the picture.",
+                  f"3. Download the finished video to {clip}.",
+                  f"4. Write {fields} containing {{\"clip\": \"{clip.replace(os.sep, '/')}\"}} and run:",
+                  f"   {py} \"{os.path.join(app, 'scenes.py')}\" set --project \"{project}\" --index {scene} --fields-file \"{fields}\"",
+                  f"   {py} \"{os.path.join(app, 'pipeline.py')}\" --project \"{project}\" --stage all",
+                  "Do not change any other scene."]
+    elif kind == "dub":
+        if language not in DUB_LANGUAGES:
+            fail("Choose a dubbing language.")
+        final = os.path.join(project, "final.mp4")
+        if not os.path.exists(final):
+            fail("Make the video first: dubbing needs the finished video.")
+        out = os.path.join(project, f"final.{language}.mp4")
+        lines += [f"Dub {final} into {DUB_LANGUAGES[language]} with Higgsfield.",
+                  "1. Upload it (media_upload, then the upload, then media_confirm). Tell me the cost before dubbing.",
+                  f"2. After I agree, run dubbing with target_language \"{language}\".",
+                  f"3. Download the result to {out}. Do not replace final.mp4.",
+                  "Only do this if everyone whose voice is in the video has agreed to be dubbed."]
+    lines.append(block(project))
+    path = os.path.join(project, "tasks", f"{kind}.txt")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_text(path, "\n".join(lines))
+    return path
+
+
+def drive_copy(project):
+    """Copy finished files into <Drive folder>/<project name>/ (a Google Drive for desktop folder). Local only."""
+    cfg = _require(project, "drive")
+    root = cfg["drive_folder"]
+    if not root or not os.path.isdir(root):
+        fail("Choose your Google Drive folder in the Services tab first (a folder Google Drive for desktop syncs).")
+    name = os.path.basename(project.rstrip("/\\"))
+    dest = os.path.join(root, name)
+    os.makedirs(dest, exist_ok=True)
+    copied = []
+    for item in ("final.mp4", "thumbnail.jpg", "thumbnail_vidiq.png", "publish.json", "packaging.md", "ideas.md", "qa.json"):
+        src = os.path.join(project, item)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dest, item))
+            copied.append(item)
+    for extra in sorted(os.listdir(project)):
+        if re.match(r"final\.[a-z]{3}\.mp4$", extra):
+            shutil.copy2(os.path.join(project, extra), os.path.join(dest, extra))
+            copied.append(extra)
+    social = os.path.join(project, "social")
+    if os.path.isdir(social):
+        shutil.copytree(social, os.path.join(dest, "social"), dirs_exist_ok=True)
+        copied.append("social/")
+    if not copied:
+        fail("Nothing to copy yet: make the video first.")
+    with open(os.path.join(project, "services-log.md"), "a", encoding="utf-8") as f:
+        f.write(f"- {datetime.date.today()} drive copy: 0 credits - {', '.join(copied)} to {dest}\n")
+    log(f"Copied {len(copied)} item(s) to {dest}")
+    log(f"DRIVE: {dest}")
+    return dest
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["show", "json", "set", "block", "task", "drive"])
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--on", nargs="*", default=[])
+    ap.add_argument("--off", nargs="*", default=[])
+    ap.add_argument("--cap-higgsfield", type=int)
+    ap.add_argument("--cap-vidiq", type=int)
+    ap.add_argument("--drive-folder")
+    ap.add_argument("--default", action="store_true", help="Also save as the default for new projects")
+    ap.add_argument("--editor", default="claude", choices=["claude", "codex"])
+    ap.add_argument("--kind")
+    ap.add_argument("--scene", type=int)
+    ap.add_argument("--language")
+    a = ap.parse_args()
+    project = os.path.abspath(a.project)
+    if a.action == "show":
+        cfg, used = load(project), spent(project)
+        for k, info in SERVICES.items():
+            extra = f", cap {cfg['caps'][k]}, used {used[k]}" if info["paid"] else f", folder {cfg['drive_folder'] or '-'}"
+            log(f"{info['name']}: {'on' if cfg['services'][k] else 'off'}{extra}")
+    elif a.action == "json":
+        import json
+        print(json.dumps(dict(load(project), spent=spent(project))))
+    elif a.action == "set":
+        cfg = load(project)
+        for k in a.on + a.off:
+            if k not in SERVICES:
+                fail(f"Unknown service '{k}'. Use: {', '.join(SERVICES)}")
+        for k in a.on:
+            cfg["services"][k] = True
+        for k in a.off:
+            cfg["services"][k] = False
+        for k in ("higgsfield", "vidiq"):
+            v = getattr(a, f"cap_{k}")
+            if v is not None:
+                cfg["caps"][k] = max(0, v)
+        if a.drive_folder is not None:
+            cfg["drive_folder"] = a.drive_folder.strip()
+        os.makedirs(project, exist_ok=True)
+        save(project, cfg, a.default)
+        log("Saved." + (" Also the default for new projects." if a.default else ""))
+    elif a.action == "block":
+        print(block(project, a.editor), end="")
+    elif a.action == "task":
+        log(f"TASK: {task(project, a.kind, a.scene, a.language)}")
+    else:
+        drive_copy(project)
+
+
+if __name__ == "__main__":
+    main()
+'@
 $files['captions.py'] = @'
 """Transcribe a video/audio file to .srt and .txt with faster-whisper."""
 import argparse
@@ -5894,6 +6374,7 @@ def main():
     check("active-speaker model (LR-ASD)", speaker_model, required=False)
     log("Optional extras")
     check("WhisperX (exact word timing)", lambda: whisperx_exe() or "not installed (built-in word timing is used)", required=False)
+    check("Codex (optional editor)", tool("codex"), required=False)
     check("MuseTalk (lip-sync)", lambda: "installed" if __import__("lipsync").available() else "not installed (lip-sync is off)",
           required=False)
     log("Local language model")
@@ -5964,6 +6445,12 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Assemble by hand: `python ..\app\assemble.py --clips a.mp4 b.mp4 --voice v.wav --format 9:16 --captions --out output\final.mp4`
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
+
+## Outside services (optional, per project)
+- Before using Higgsfield, vidIQ or any other outside service, read the project's rules: `python ..\app\services.py block --project <project folder>`.
+  A service that is off must not be used. Allowed services have a credit cap: quote each cost, wait for a yes, and log every paid call in the project's `services-log.md`.
+- Nothing in this app requires a service. If one fails or is off, use the local way.
+- A ready-made clip can replace a scene's picture: `scenes.py set --index N --fields-file f.json` with `{"clip": "<path>"}`.
 
 ## Memory (this PC: 16 GB RAM, 4 GB graphics card)
 - Never render cuts with one ffmpeg filter graph of many trim/atrim filters: it ran out of memory on a 10-minute
