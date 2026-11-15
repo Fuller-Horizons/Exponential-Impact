@@ -556,7 +556,9 @@ def lip_sync_is_optional():
     try:
         assert lipsync.available() and lipsync.sync(clip, wav) is True
         fps = sh("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", clip)
-        assert fps.strip() == "25/1", "the clip was replaced by the lip-synced 25 fps version"
+        import common
+        assert fps.strip() == "30/1", "lip-synced clips go back to 30 fps so scenes still join without re-encoding"
+        assert common.probe(clip)["tag"] == common.enc_tag(), "the clip was replaced by the lip-synced version"
         # in a real run: only single-person footage scenes are lip-synced, and turning it on re-makes just those
         env = dict(ENV, PSTUDIO_MUSETALK=os.path.dirname(fake), PSTUDIO_MUSETALK_PYTHON=PY)
         out = sh(PY, os.path.join(SRC, "pipeline.py"), "--project", PROJECT, "--stage", "all", "--lipsync", "on",
