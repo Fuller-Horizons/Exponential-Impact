@@ -5,6 +5,8 @@
              PyTorch (CUDA 12.4), Qwen3-TTS 0.6B voice cloning, faster-whisper, diffusers, Pillow,
              a local language model (Ollama), claude-video "watch" skill, HyperFrames CLI.
   After install everything in the Create tab runs on this PC with no cloud calls.
+  Hybrid part: the "Edit recording" tab hands a raw recording to Claude Code (a cloud model, your subscription)
+  with the Herk Edit Kit by Nate Herk (MIT). Installing the kit runs its npm packages' install scripts.
   Creates :  <Root>\app\PodcastStudio.ps1 (GUI), <Root>\workspace, desktop shortcut.
 
   Run (normal PowerShell window, not admin):
@@ -35,6 +37,7 @@ $Pins = @{
     'claude-video' = @{ repo = 'bradautomates/claude-video'; sha = '03ceb42f7fa2c4439aca01752118044baabffb8f' }
     'Qwen3-TTS'    = @{ repo = 'QwenLM/Qwen3-TTS';           sha = '022e286b98fbec7e1e916cb940cdf532cd9f488e' }
     'LR-ASD'       = @{ repo = 'Junhua-Liao/LR-ASD';         sha = '1b6dcd2d8fc2895683de6508ec6294ec47d388ca' }
+    'herk-edit-kit' = @{ repo = 'nateherkai/herk-edit-kit';  sha = '10511e5af86fc47756ea89803b397422e2d89284' }
 }
 $MuseTalkSha = '0a89dec45a0192b824e3cf4daf96c239440c5ed8'
 $PyPins = 'faster-whisper==1.2.1', 'diffusers==0.39.0', 'pillow==13.0.0', 'fal-client==1.0.3',
@@ -156,7 +159,7 @@ if (-not $SkipClaude) {
 
 # ------------------------------------------------------------------ 4. folders + repos
 Step "Creating $Root"
-foreach ($d in 'repos', 'app', 'logs', 'models', 'workspace\highlights', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
+foreach ($d in 'repos', 'app', 'logs', 'models', 'workspace\highlights', 'workspace\episodes', 'workspace\analysis', 'workspace\voice', 'workspace\scripts', 'workspace\clips', 'workspace\output', 'workspace\frames', 'workspace\projects', 'workspace\library') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Root $d) | Out-Null
 }
 foreach ($name in $Pins.Keys) {
@@ -174,6 +177,17 @@ foreach ($name in $Pins.Keys) {
         else { Warn "${name}: pinned commit unavailable - using the cloned version" }
     }
 }
+
+# Herk Edit Kit (MIT, by Nate Herk): the editing skills Claude Code uses in the "Edit recording" tab
+$kit = Join-Path $Root 'repos\herk-edit-kit'
+if ((Test-Path (Join-Path $kit 'package.json')) -and (Has 'npm')) {
+    Step 'Herk Edit Kit packages (npm ci) - used by Claude Code to edit recordings'
+    Push-Location $kit
+    $kitOk = Native 'npm ci (herk-edit-kit)' { & npm ci --no-audit --no-fund --silent } -Soft
+    if ($kitOk) { Native 'kit setup' { & npm run setup --silent } -Soft | Out-Null }
+    Pop-Location
+    if ($kitOk) { Ok 'Herk Edit Kit ready' } else { Warn 'The kit packages did not install. "Edit recording" still prepares files; Claude Code can finish the setup.' }
+} else { Warn 'Herk Edit Kit or npm missing - the "Edit recording" tab will not have its editing skills.' }
 
 # ------------------------------------------------------------------ 5. Python environment
 Step 'Python environment (PyTorch + Qwen3-TTS + faster-whisper + fal.ai) - this is the big download'
@@ -366,6 +380,29 @@ $Framings = [ordered]@{
 function Get-FramingLabel([string]$value) {
     foreach ($k in $Framings.Keys) { if ($Framings[$k] -eq $value) { return $k } }
     return ''
+}
+$Kit = Join-Path $Root 'repos\herk-edit-kit'
+$RulesFile = Join-Path $Work 'house-rules.md'
+function Get-Slug([string]$name) {
+    $s = ([System.IO.Path]::GetFileNameWithoutExtension($name).ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+    if (-not $s) { $s = 'recording' }
+    return $s
+}
+function Add-HouseRule([string]$text, [string]$file = $RulesFile) {
+    $text = ($text -replace '\s+', ' ').Trim()
+    if (-not $text) { return $false }
+    if (-not (Test-Path $file)) {
+        [System.IO.File]::WriteAllText($file, "# House rules`n`nLasting corrections. Every script, edit and post follows these.`n`n")
+    }
+    [System.IO.File]::AppendAllText($file, "- $text`n")
+    return $true
+}
+function Start-Claude([string]$dir, [string]$promptFile) {
+    # Opens Claude Code in its own window with the prompt read from a file (no quoting problems)
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Msg 'Claude Code is not installed or not on PATH. Re-run the installer, then run "claude" once to sign in.'; return $false }
+    $safe = $promptFile -replace "'", "''"
+    Start-Process powershell.exe -WorkingDirectory $dir -ArgumentList '-NoExit', '-Command', "claude (Get-Content -Raw -LiteralPath '$safe')"
+    return $true
 }
 $VideoFilter = 'Video|*.mp4;*.mov;*.mkv;*.webm|All files|*.*'
 $AudioFilter = 'Audio|*.wav;*.mp3;*.m4a;*.flac|All files|*.*'
@@ -631,7 +668,7 @@ $n0.Size = New-Object System.Drawing.Size(760, 34)
 function Show-BrandKit([string]$path = '') {
     if (-not $path) { $path = Join-Path $Work 'brand.json' }
     $kit = @{ accent = '#FFC400'; background = '#20223E'; text = '#FFFFFF'; caption_highlight = '#FFD700'
-              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right' }
+              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right'; music = '' }
     if (Test-Path $path) {
         try {
             $saved = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
@@ -639,7 +676,7 @@ function Show-BrandKit([string]$path = '') {
         } catch { }
     }
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 400); $f.StartPosition = 'CenterParent'
+    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 440); $f.StartPosition = 'CenterParent'
     $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     $pick = {
         $d = New-Object System.Windows.Forms.ColorDialog
@@ -680,8 +717,17 @@ function Show-BrandKit([string]$path = '') {
     Add-Label $f 'Logo corner' 20 $y 200 | Out-Null
     $pos = Add-Combo $f 230 $y 120 @('top-right', 'top-left')
     if ($pos.Items.Contains([string]$kit.logo_position)) { $pos.SelectedItem = [string]$kit.logo_position }
-    $ok = Add-Button $f 'Save' 300 310 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
-    $cancel = Add-Button $f 'Cancel' 400 310 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    $y += 36
+    Add-Label $f 'Music bed (optional)' 20 $y 200 | Out-Null
+    $music = Add-Text $f 230 $y 170 ([string]$kit.music)
+    $mb = Add-Button $f '...' 405 ($y - 2) 35
+    $mb.Tag = $music
+    $mb.Add_Click({ $p = Pick-File $AudioFilter $Work; if ($p) { $this.Tag.Text = $p } })
+    $mc = Add-Button $f 'Clear' 445 ($y - 2) 50
+    $mc.Tag = $music
+    $mc.Add_Click({ $this.Tag.Text = '' })
+    $ok = Add-Button $f 'Save' 300 350 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
+    $cancel = Add-Button $f 'Cancel' 400 350 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
     if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::OK }) }
     if ($f.ShowDialog($form) -ne 'OK') { return }
     $out = [ordered]@{}
@@ -693,16 +739,95 @@ function Show-BrandKit([string]$path = '') {
     $out['caption_uppercase'] = [bool]$upper.Checked
     $out['logo'] = $logo.Text
     $out['logo_position'] = [string]$pos.SelectedItem
+    $out['music'] = $music.Text
     [System.IO.File]::WriteAllText($path, ($out | ConvertTo-Json))
     Log "Brand kit saved: $path (used by the next video you make)"
 }
+
+# ================================================================ TAB: Edit recording (hybrid: prepared here, edited by Claude Code + Herk Edit Kit)
+$tR = New-Tab 'Edit recording'
+Add-Label $tR 'Raw recording' 10 12 | Out-Null
+$rFile = Add-Text $tR 150 12 640
+$b = Add-Button $tR 'Browse...' 800 10 110
+$b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $rFile.Text = $f; $rSlug.Text = Get-Slug $f; Load-RecordingPrompt } })
+Add-Label $tR 'Project name' 10 47 | Out-Null
+$rSlug = Add-Text $tR 150 47 250
+Add-Label $tR 'Type' 415 47 40 | Out-Null
+$rKind = Add-Combo $tR 460 47 210 @('Short (reel or Short)', 'Long video')
+$rPrompt = Add-Text $tR 150 165 760 '' 175
+$lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
+$lr.Size = New-Object System.Drawing.Size(135, 80)
+
+function Get-RecordingKind { if ($rKind.SelectedIndex -eq 1) { return 'long' } else { return 'short' } }
+function Get-RecordingProject {
+    if (-not $rSlug.Text.Trim()) { return $null }
+    return (Join-Path $Kit ("video-projects\" + $rSlug.Text.Trim()))
+}
+function Load-RecordingPrompt {
+    $rPrompt.Text = ''
+    $proj = Get-RecordingProject; if (-not $proj) { return }
+    $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
+    if (Test-Path $pf) { $rPrompt.Text = ([System.IO.File]::ReadAllText($pf) -replace "`r?`n", "`r`n") }
+}
+$rKind.Add_SelectedIndexChanged({ Load-RecordingPrompt })
+
+$b = Add-Button $tR '1. Prepare (transcribe here)' 150 85 220
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
+    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work) { Load-RecordingPrompt }
+})
+$b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
+$b.Add_Click({
+    $proj = Get-RecordingProject
+    if (-not $proj -or -not (Test-Path (Join-Path $proj 'assets\raw.json'))) { Msg 'Press "1. Prepare" first.'; return }
+    if (-not $rPrompt.Text.Trim()) { Load-RecordingPrompt }
+    $pf = Join-Path $proj ("prompt-" + (Get-RecordingKind) + ".txt")
+    [System.IO.File]::WriteAllText($pf, ($rPrompt.Text -replace "`r`n", "`n"))
+    if (Start-Claude $Kit $pf) { Log "Claude Code opened in $Kit. Its window shows the edit; answer its questions there." }
+})
+$b = Add-Button $tR 'Open project folder' 590 85 160
+$b.Add_Click({ $proj = Get-RecordingProject; if ($proj -and (Test-Path $proj)) { Start-Process explorer.exe $proj } else { Msg 'Nothing prepared yet.' } })
+$b = Add-Button $tR 'House rules' 760 85 150
+$b.Add_Click({
+    if (-not (Test-Path $RulesFile)) { [void](Add-HouseRule 'Example: never open with "In this video". (Delete this line and add your own.)') }
+    Start-Process notepad.exe $RulesFile
+})
+$b = Add-Button $tR 'Quick trim (no AI)' 150 125 220
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    $out = [System.IO.Path]::ChangeExtension($rFile.Text, $null).TrimEnd('.') + '.tight.mp4'
+    $script:ctx = @{ out = $out }
+    Run-Py 'Quick trim: remove dead air (on this PC, no AI)' 'recording.py' @('tighten', '--recording', $rFile.Text, '--out', $out) {
+        if (Test-Path $script:ctx.out) { Start-Process explorer.exe "/select,`"$($script:ctx.out)`"" }
+    }
+})
+Add-Label $tR 'Removes pauses only and saves a copy next to the recording.' 380 125 530 | Out-Null
+$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit (cuts, story, captions, motion graphics). ' +
+    'The transcript and editing decisions go to Claude; the video files stay here. Uses your Claude subscription.') 150 348 760
+$nR.Size = New-Object System.Drawing.Size(760, 60)
 
 # ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
 $tS = New-Tab 'Scenes'
 $script:sceneData = @()
 $b = Add-Button $tS 'Load scenes' 10 10 120
 $b.Add_Click({ Load-Scenes $false })
-$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 760
+$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 600
+$b = Add-Button $tS 'Add a house rule...' 760 10 150
+$b.Add_Click({ Show-RuleDialog })
+function Show-RuleDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Add a house rule'; $f.Size = New-Object System.Drawing.Size(560, 230); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $l = Add-Label $f 'A lasting correction, in one sentence. Every future script, edit and post will follow it.' 15 12 520
+    $l.Size = New-Object System.Drawing.Size(520, 36)
+    $box = Add-Text $f 15 55 515 '' 70
+    $ok = Add-Button $f 'Save rule' 330 140 100; $ok.DialogResult = 'OK'
+    $cancel = Add-Button $f 'Cancel' 440 140 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($script:Smoke) { $f.Opacity = 0; $f.ShowInTaskbar = $false; $f.Add_Shown({ $this.DialogResult = [System.Windows.Forms.DialogResult]::Cancel }) }
+    if ($f.ShowDialog($form) -ne 'OK') { return }
+    if (Add-HouseRule $box.Text) { Log "House rule saved: $($box.Text.Trim())" }
+}
 $eList = New-Object System.Windows.Forms.ListBox
 $eList.Location = New-Object System.Drawing.Point(10, 45); $eList.Size = New-Object System.Drawing.Size(340, 340)
 $eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font('Consolas', 9)
@@ -954,9 +1079,34 @@ $b.Add_Click({
 })
 $b = Add-Button $tP 'Open' 830 285 80
 $b.Add_Click({ if ($script:pubUrl) { Start-Process $script:pubUrl } else { Msg 'This project has not been uploaded yet.' } })
+$b = Add-Button $tP 'Write social posts (local)' 150 320 210
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py 'Write LinkedIn post, X thread and carousel (local model)' 'repurpose.py' @('--project', $dir, '--model', $cModel.Text) {
+        $d = Join-Path (Get-Project) 'social'
+        if (Test-Path $d) { Start-Process explorer.exe $d }
+    }
+})
+$b = Add-Button $tP 'Open posts folder' 370 320 150
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $d = Join-Path $dir 'social'
+    if (Test-Path $d) { Start-Process explorer.exe $d } else { Msg 'No posts yet. Press "Write social posts (local)".' }
+})
+$b = Add-Button $tP 'Polish with Claude Code' 530 320 190
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $d = Join-Path $dir 'social'
+    if (-not (Test-Path (Join-Path $d 'linkedin.txt'))) { Msg 'Write the social posts first.'; return }
+    $pf = Join-Path $d 'polish-prompt.txt'
+    [System.IO.File]::WriteAllText($pf, ("Read script.txt, then social/linkedin.txt, social/x-thread.txt and social/carousel.txt. " +
+        "Rewrite the three posts so they are sharper and sound like this show, keeping every claim true to script.txt. " +
+        "Follow every rule in $RulesFile if it exists. Save over the same three files and show me what changed. Do not post anything anywhere."))
+    [void](Start-Claude $dir $pf)
+})
 $nP = Add-Label $tP ('Nothing leaves this PC until you press Upload and confirm. Videos upload as private unless you change Privacy. ' +
     'One-time setup: in Google Cloud Console create a project, enable "YouTube Data API v3", create an OAuth client of type "Desktop app", ' +
-    'download its JSON file and choose it with "YouTube sign-in file...". The first upload opens your browser to sign in.') 150 330 760
+    'download its JSON file and choose it with "YouTube sign-in file...". Social posts are drafts in the project''s social folder; nothing is posted.') 150 360 760
 $nP.Size = New-Object System.Drawing.Size(760, 80)
 
 # ================================================================ TAB 1: Analyze
@@ -1009,8 +1159,17 @@ $b.Add_Click({
         if (Test-Path $script:ctx.out) { Start-Process notepad.exe $script:ctx.out }
     }
 })
+$b = Add-Button $t1 'Download + index (YouTube)' 10 180 230
+$b.Add_Click({
+    if ($aSrc.Text -notlike 'http*') { Msg 'Paste a YouTube video, playlist or channel link in the box at the top.'; return }
+    Run-Py 'Download from YouTube and add to the footage library' 'ytimport.py' @('--url', $aSrc.Text, '--dest', (Join-Path $Work 'episodes'),
+        '--lib', (Join-Path $Work 'library'), '--max', $aMax.Text) { $cLib.Text = Join-Path $Work 'episodes' }
+})
+Add-Label $t1 'up to' 250 180 40 | Out-Null
+$aMax = Add-Text $t1 292 180 40 '5'
+Add-Label $t1 'videos. Only for videos you own or may reuse.' 340 180 400 | Out-Null
 $note = Add-Label $t1 ("Tips: 'balanced' samples scene changes. For a 45-min episode, analyse 5-10 min windows with Start/End. " +
-    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 190 900
+    "Output lands in workspace\analysis. The style bible is written on this PC from your indexed episodes; the Create tab reads it automatically.") 10 222 900
 $note.Size = New-Object System.Drawing.Size(900, 60)
 
 # ================================================================ TAB 2: Voice
@@ -1246,7 +1405,7 @@ Check 'screens build without errors' {
     'no errors'
 }
 Check 'all tabs open' {
-    Expect ($tabs.TabPages.Count -eq 8) "expected 8 tabs, found $($tabs.TabPages.Count)"
+    Expect ($tabs.TabPages.Count -eq 9) "expected 9 tabs, found $($tabs.TabPages.Count)"
     $names = @()
     for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
         $tabs.SelectedIndex = $i; Pump 60
@@ -1361,6 +1520,25 @@ Check 'default model setting' {
     $cModel.Text = $before
     Expect ($seen -eq 'smoke-model:1b') "model box shows '$seen'"
     'model box follows settings.json'
+}
+Check 'recording tab and house rules' {
+    Expect ((Get-Slug 'C:\x\My Take #3 (final).MOV') -eq 'my-take-3-final') "slug is '$(Get-Slug 'C:\x\My Take #3 (final).MOV')'"
+    Expect ((Get-Slug '!!!.mp4') -eq 'recording') 'empty names need a fallback'
+    $rSlug.Text = 'smoke-take'
+    Expect ((Get-RecordingProject) -eq (Join-Path $Kit 'video-projects\smoke-take')) 'recording project path is wrong'
+    $rKind.SelectedIndex = 1
+    Expect ((Get-RecordingKind) -eq 'long') 'type box does not map to the long edit'
+    $rKind.SelectedIndex = 0
+    Expect ((Get-RecordingKind) -eq 'short') 'type box does not map to the short edit'
+    $rSlug.Text = ''
+    $rules = Join-Path $smokeDir 'rules.md'
+    Expect (Add-HouseRule "  Never   open with a greeting. " $rules) 'rule was not saved'
+    Expect (-not (Add-HouseRule '   ' $rules)) 'an empty rule must be refused'
+    [void](Add-HouseRule 'Keep hooks under ten words.' $rules)
+    $text = [System.IO.File]::ReadAllText($rules)
+    Expect ($text -match '# House rules' -and $text -match '- Never open with a greeting\.' -and $text -match '- Keep hooks under ten words\.') 'rules file content is wrong'
+    Show-RuleDialog
+    'slug, project path, type and rules file'
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'
@@ -2022,8 +2200,11 @@ def _font(size, preferred=()):
     return ImageFont.load_default()
 
 
-def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
-    """Render a title/quote card as a PNG in the brand colours: gradient, accent bar, centred wrapped text."""
+def card_image(text, out_png, fmt="9:16", kicker=None, brand=None, canvas=None, body=None):
+    """Render a title/quote card as a PNG in the brand colours: gradient, accent bar, centred wrapped text.
+
+    `canvas=(width, height)` overrides the video shape (used for carousel slides); `body` adds smaller text below.
+    """
     from PIL import Image, ImageDraw
 
     import brand as brandkit
@@ -2031,7 +2212,7 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
     kit = brand or brandkit.load()
     accent, ink, base = brandkit.rgb(kit["accent"]), brandkit.rgb(kit["text"]), brandkit.rgb(kit["background"], (32, 34, 62))
     fonts = brandkit.font_files(kit)
-    W, H = FORMATS[fmt]
+    W, H = canvas or FORMATS[fmt]
     column = Image.new("RGB", (1, H))
     for y in range(H):  # darker at the top, the brand background colour at the bottom
         t = 0.45 + 0.55 * y / H
@@ -2050,7 +2231,10 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
             break
         size = int(size * 0.9)
 
-    block_h = line_h * len(lines)
+    body_font = _font(int(size * 0.5), fonts)
+    body_lines = textwrap.wrap(" ".join(body.split()), max(12, int(W * 0.8 / (size * 0.5 * 0.56)))) if body else []
+    body_h = int(size * 0.5 * 1.4)
+    block_h = line_h * len(lines) + (int(size * 0.6) + body_h * len(body_lines) if body_lines else 0)
     y = (H - block_h) // 2
     bar_w, bar_h = int(W * 0.12), max(6, int(size * 0.14))
     draw.rectangle([(W - bar_w) // 2, y - bar_h * 4, (W + bar_w) // 2, y - bar_h * 3], fill=accent)
@@ -2063,6 +2247,11 @@ def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
         draw.text(((W - w) // 2 + 3, y + 3), line, font=font, fill=(0, 0, 0))
         draw.text(((W - w) // 2, y), line, font=font, fill=ink)
         y += line_h
+    y += int(size * 0.6)
+    for line in body_lines:
+        w = draw.textlength(line, font=body_font)
+        draw.text(((W - w) // 2, y), line, font=body_font, fill=tuple(int(c * 0.85) for c in ink))
+        y += body_h
     img.save(out_png)
     return out_png
 
@@ -2537,6 +2726,7 @@ DEFAULT = {
     "font_file": "",
     "logo": "",                     # PNG shown in a corner of the whole video
     "logo_position": "top-right",   # top-right | top-left
+    "music": "",                    # a music file played quietly under every video (lowered while someone speaks)
 }
 # family name (used by captions) -> bold font file in C:\Windows\Fonts (used by cards)
 FONTS = {
@@ -3039,11 +3229,17 @@ def save(project, cfg):
 
 
 def style_bible(project):
-    for p in (os.path.join(project, "style-bible.md"),
-              os.path.join(os.path.dirname(os.path.dirname(project)), "style-bible.md")):
+    """The show's style guide, with the house rules (lasting corrections) placed first so they win."""
+    workspace = os.path.dirname(os.path.dirname(project))
+    text = ""
+    for p in (os.path.join(project, "style-bible.md"), os.path.join(workspace, "style-bible.md")):
         if os.path.exists(p):
-            return read_text(p)[:6000]
-    return ""
+            text = read_text(p)[:6000]
+            break
+    rules = os.path.join(workspace, "house-rules.md")
+    if os.path.exists(rules) and read_text(rules).strip():
+        text = "HOUSE RULES (always follow these):\n" + read_text(rules).strip()[:3000] + ("\n\n" + text if text else "")
+    return text
 
 
 def library_dir(cfg, project):
@@ -3448,8 +3644,9 @@ def stage_render(project, cfg, force):
         cmd += ["--ass", ass]
     if kit["logo"] and os.path.exists(kit["logo"]):
         cmd += ["--logo", kit["logo"], "--logo-position", kit["logo_position"]]
-    if cfg.get("music") and os.path.exists(cfg["music"]):
-        cmd += ["--music", cfg["music"]]
+    music = cfg.get("music") or kit.get("music")
+    if music and os.path.exists(music):
+        cmd += ["--music", music]
     run(cmd)
     got = duration(final)
     ok = abs(got - offset) < 1.5
@@ -4452,6 +4649,346 @@ def main():
 if __name__ == "__main__":
     main()
 '@
+$files['recording.py'] = @'
+"""Edit a raw recording, the hybrid way: this PC prepares it, Claude Code edits it with the Herk Edit Kit.
+
+  python recording.py prepare --recording take.mp4 --slug my-take      copy into the kit, transcribe locally,
+                                                                      write the prompts for Claude Code
+  python recording.py tighten --recording take.mp4 --out tight.mp4    quick local silence trim, no AI
+
+The Herk Edit Kit (MIT, by Nate Herk) lives in <PodcastStudio>/repos/herk-edit-kit. Its skills run inside
+Claude Code, which is a cloud model: the transcript and editing decisions go to Claude; the video files stay here.
+"""
+import argparse
+import os
+import re
+import shutil
+import subprocess
+
+from common import FF, duration, ensure_dir, fail, log, read_json, studio_root, transcribe_words, write_json, write_text
+
+SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SKILLS = {"short": "short-form-edit", "long": "edit-video"}
+
+
+def kit_dir():
+    return os.environ.get("PSTUDIO_KIT") or os.path.join(studio_root(), "repos", "herk-edit-kit")
+
+
+def make_slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", os.path.splitext(os.path.basename(name))[0].lower()).strip("-") or "recording"
+
+
+def kit_transcript(segments, seconds):
+    """Our word-level transcript in the kit's format: {"text", "audio_duration_secs", "words": [{"text", "start", "end"}]}."""
+    words = [{"text": w, "start": a, "end": b} for seg in segments for a, b, w in seg["words"]]
+    return {"text": " ".join(seg["text"] for seg in segments).strip(), "audio_duration_secs": round(seconds, 3),
+            "words": words}
+
+
+def prompt(slug, kind, workspace):
+    """What the app asks Claude Code to do, as plain text the user can read and change."""
+    rules = os.path.join(workspace, "house-rules.md")
+    brand = os.path.join(workspace, "brand.json")
+    bible = os.path.join(workspace, "style-bible.md")
+    return (
+        f"Use the {SKILLS[kind]} skill to edit the recording in video-projects/{slug}.\n\n"
+        f"- Source: video-projects/{slug}/assets/raw.mp4. Keep it untouched.\n"
+        f"- Transcript: video-projects/{slug}/assets/raw.json was made on this PC and is already in this kit's "
+        "word-level format. Do not call ElevenLabs, Kie.ai or any other paid or cloud service, and do not upload "
+        "the footage anywhere.\n"
+        "- Follow the kit's order: cut silences, then mistakes, then the story and motion graphics.\n"
+        f"- House rules: read {rules} if it exists and follow every rule. When I give you a note about the edit, "
+        "apply it and add it to that file as one short rule so the next edit follows it too.\n"
+        f"- Brand: use the colours, font and logo in {brand} if it exists. Show style: {bible} if it exists.\n"
+        "- Show me the planned cuts before rendering, then render the final video into this project's renders folder "
+        "and tell me its path.\n")
+
+
+def prepare(recording, slug, workspace, whisper="small"):
+    kit = kit_dir()
+    if not os.path.exists(os.path.join(kit, "CLAUDE.md")):
+        fail(f"The Herk Edit Kit is not installed at {kit}. Re-run Setup-PodcastStudio.ps1.")
+    if not os.path.exists(recording):
+        fail(f"Recording not found: {recording}")
+    if not SLUG.match(slug):
+        fail("The project name must be lowercase letters, digits and dashes, like my-first-take.")
+    project = os.path.join(kit, "video-projects", slug)
+    if not os.path.exists(project):
+        made = False
+        if os.path.exists(os.path.join(kit, "node_modules", "gsap")):
+            done = subprocess.run(["node", os.path.join("scripts", "new-video.mjs"), slug], cwd=kit,
+                                  capture_output=True, text=True, shell=os.name == "nt")
+            made = done.returncode == 0 and os.path.exists(project)
+            if not made:
+                log("  the kit could not create its starter project: " + (done.stderr or done.stdout)[-200:].strip())
+        else:
+            log("  the kit's packages are not installed (npm ci) - making a bare project; Claude Code can finish the setup")
+        if not made:
+            for sub in ("assets", "compositions", "renders"):
+                ensure_dir(os.path.join(project, sub))
+    assets = ensure_dir(os.path.join(project, "assets"))
+    raw = os.path.join(assets, "raw.mp4")
+    if not os.path.exists(raw) or abs(duration(raw) - duration(recording)) > 0.5:
+        if recording.lower().endswith(".mp4"):
+            shutil.copy2(recording, raw)
+        else:
+            log("Converting the recording to MP4...")
+            subprocess.run(FF + ["-i", recording, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                                 "-c:a", "aac", "-b:a", "192k", raw], check=True)
+    transcript = os.path.join(assets, "raw.json")
+    if not os.path.exists(transcript):
+        log("Transcribing on this PC (word-level)...")
+        data = kit_transcript(transcribe_words(raw, whisper), duration(raw))
+        if not data["words"]:
+            fail("No speech was found in this recording.")
+        write_json(transcript, data)
+    words = len(read_json(transcript)["words"])
+    for kind in SKILLS:
+        write_text(os.path.join(project, f"prompt-{kind}.txt"), prompt(slug, kind, workspace))
+    log(f"Ready: {project}\n  raw.mp4 ({duration(raw):.0f}s), raw.json ({words} words), prompt-short.txt, prompt-long.txt")
+    log(f"RECORDING PROJECT: {project}")
+    return project
+
+
+def keep_ranges(words, total, gap=0.55, head=0.22, tail=0.34):
+    """Parts of a recording to keep once dead air is trimmed, using the rules documented in the kit's cut-silences
+    skill: pauses under `gap` stay; longer ones shrink to a natural breath (0.24 s after a 2 s+ pause, 0.20 s after
+    a sentence, 0.14 s otherwise); silence before the first and after the last word is trimmed to `head`/`tail`."""
+    if not words:
+        return [(0.0, total)]
+    ranges, start = [], max(0.0, words[0][0] - head)
+    for (a0, b0, w0), (a1, b1, w1) in zip(words, words[1:]):
+        pause = a1 - b0
+        if pause >= gap:
+            breath = 0.24 if pause >= 2.0 else 0.20 if w0.rstrip()[-1:] in ".!?" else 0.14
+            ranges.append((start, b0 + breath * 0.6))
+            start = a1 - breath * 0.4
+    ranges.append((start, min(total, words[-1][1] + tail)))
+    return [(round(a, 3), round(b, 3)) for a, b in ranges if b - a > 0.02]
+
+
+def retime(words, ranges):
+    """Word timings moved onto the trimmed timeline."""
+    out, shift = [], 0.0
+    for a, b in ranges:
+        out += [[round(s - a + shift, 2), round(e - a + shift, 2), w] for s, e, w in words if s >= a - 0.01 and e <= b + 0.01]
+        shift += b - a
+    return out
+
+
+def tighten(recording, out_mp4, whisper="small"):
+    """Trim dead air from a recording on this PC (no AI decisions): writes the video and its re-timed words."""
+    if not os.path.exists(recording):
+        fail(f"Recording not found: {recording}")
+    total = duration(recording)
+    words = [w for seg in transcribe_words(recording, whisper) for w in seg["words"]]
+    if not words:
+        fail("No speech was found in this recording.")
+    ranges = keep_ranges(words, total)
+    parts = []
+    for n, (a, b) in enumerate(ranges):
+        parts.append(f"[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[v{n}];"
+                     f"[0:a]atrim=start={a}:end={b},asetpts=PTS-STARTPTS[a{n}]")
+    graph = ";".join(parts) + ";" + "".join(f"[v{n}][a{n}]" for n in range(len(ranges))) + f"concat=n={len(ranges)}:v=1:a=1[v][a]"
+    script = out_mp4 + ".filter.txt"
+    write_text(script, graph)
+    tail_args = ["-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                 "-c:a", "aac", "-b:a", "192k", out_mp4]
+    done = subprocess.run(FF + ["-i", recording, "-/filter_complex", script] + tail_args, capture_output=True, text=True)
+    if done.returncode != 0:   # older ffmpeg spells the option differently
+        done = subprocess.run(FF + ["-i", recording, "-filter_complex_script", script] + tail_args, capture_output=True, text=True)
+    os.remove(script)
+    if done.returncode != 0:
+        fail("ffmpeg could not trim the recording: " + done.stderr[-300:])
+    kept = duration(out_mp4)
+    write_json(os.path.splitext(out_mp4)[0] + ".words.json", retime(words, ranges))
+    log(f"Trimmed {total - kept:.1f}s of dead air ({(total - kept) / total:.0%}): {total:.1f}s -> {kept:.1f}s in {len(ranges)} pieces")
+    log(f"TIGHTENED: {out_mp4}")
+    return ranges
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["prepare", "tighten"])
+    ap.add_argument("--recording", required=True)
+    ap.add_argument("--slug")
+    ap.add_argument("--workspace", default=os.path.join(studio_root(), "workspace"))
+    ap.add_argument("--out")
+    ap.add_argument("--whisper", default="small")
+    a = ap.parse_args()
+    if a.action == "prepare":
+        prepare(os.path.abspath(a.recording), a.slug or make_slug(a.recording), os.path.abspath(a.workspace), a.whisper)
+    else:
+        out = a.out or os.path.splitext(a.recording)[0] + ".tight.mp4"
+        tighten(os.path.abspath(a.recording), os.path.abspath(out), a.whisper)
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['repurpose.py'] = @'
+"""Turn one video into social posts: a LinkedIn post, an X thread and carousel slides. Drafted by the local model.
+
+  python repurpose.py --project <project folder>            uses the project's script
+  python repurpose.py --text-file transcript.txt --out DIR  uses any transcript
+
+Writes linkedin.txt, x-thread.txt, carousel.txt and slide_01.png ... into <project>/social (or --out).
+Nothing is posted anywhere: these are drafts for you to review and paste.
+"""
+import argparse
+import os
+
+from common import ensure_dir, fail, log, read_json, read_text, write_json, write_text
+
+SCHEMA = {"type": "object", "required": ["linkedin", "thread", "slides"], "properties": {
+    "linkedin": {"type": "string"},
+    "thread": {"type": "array", "items": {"type": "string"}},
+    "slides": {"type": "array", "items": {"type": "object", "required": ["headline"], "properties": {
+        "headline": {"type": "string"}, "body": {"type": "string"}}}}}}
+SLIDE = (1080, 1350)   # 4:5, the carousel size Instagram and LinkedIn both accept
+
+
+def house_rules(workspace):
+    path = os.path.join(workspace, "house-rules.md")
+    return read_text(path)[:3000] if os.path.exists(path) else ""
+
+
+def draft(text, title, model, rules=""):
+    import llm
+
+    system = ("You turn a video transcript into social posts in the speaker's own voice. Reply with JSON only. "
+              "Use only claims that are in the transcript. Plain words, no hype, no emojis unless the rules ask."
+              + (f"\n\nHOUSE RULES (always follow):\n{rules}" if rules else ""))
+    user = (f"Video title: {title}\n\nTRANSCRIPT:\n{text[:6000]}\n\n"
+            "Return JSON with:\n"
+            "- \"linkedin\": one post of 120 to 220 words. First line is a hook that stands alone. Short paragraphs "
+            "separated by blank lines. End with a question.\n"
+            "- \"thread\": 5 to 8 posts for X, each under 270 characters. The first is the hook; the last points to the video.\n"
+            "- \"slides\": 5 to 8 carousel slides. Each has a \"headline\" of at most 8 words and a \"body\" of at most "
+            "25 words. Slide 1 is the hook; the last slide is the call to action.")
+    got = llm.chat(system, user, model, schema=SCHEMA, temperature=0.6)
+    thread = [" ".join(str(t).split())[:280] for t in (got.get("thread") or []) if str(t).strip()][:10]
+    slides = []
+    for s in got.get("slides") or []:
+        if isinstance(s, dict) and str(s.get("headline") or "").strip():
+            slides.append({"headline": " ".join(str(s["headline"]).split())[:80],
+                           "body": " ".join(str(s.get("body") or "").split())[:200]})
+    return {"linkedin": str(got.get("linkedin") or "").strip(), "thread": thread, "slides": slides[:10]}
+
+
+def write_out(posts, out_dir, kit, title):
+    import visuals
+
+    ensure_dir(out_dir)
+    write_text(os.path.join(out_dir, "linkedin.txt"), posts["linkedin"] + "\n")
+    write_text(os.path.join(out_dir, "x-thread.txt"),
+               "\n\n".join(f"{n}/{len(posts['thread'])}  {t}" for n, t in enumerate(posts["thread"], 1)) + "\n")
+    write_text(os.path.join(out_dir, "carousel.txt"),
+               "\n\n".join(f"Slide {n}: {s['headline']}\n{s['body']}" for n, s in enumerate(posts["slides"], 1)) + "\n")
+    for old in os.listdir(out_dir):
+        if old.startswith("slide_") and old.endswith(".png"):
+            os.remove(os.path.join(out_dir, old))
+    for n, s in enumerate(posts["slides"], 1):
+        visuals.card_image(s["headline"], os.path.join(out_dir, f"slide_{n:02}.png"), brand=kit, canvas=SLIDE,
+                           kicker=title if n == 1 else f"{n} / {len(posts['slides'])}", body=s["body"])
+    write_json(os.path.join(out_dir, "posts.json"), posts)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project")
+    ap.add_argument("--text-file")
+    ap.add_argument("--out")
+    ap.add_argument("--title", default="")
+    ap.add_argument("--model", default="gemma3:4b")
+    a = ap.parse_args()
+
+    import brand
+    if a.project:
+        project = os.path.abspath(a.project)
+        source = os.path.join(project, "script.txt")
+        if not os.path.exists(source):
+            fail("This project has no script yet. Make the video first.")
+        title = a.title or (read_json(os.path.join(project, "script.json"), {}) or {}).get("title", "")
+        out_dir = a.out or os.path.join(project, "social")
+        workspace, kit = os.path.dirname(os.path.dirname(project)), brand.load(project)
+    elif a.text_file:
+        source, title = a.text_file, a.title
+        if not a.out:
+            fail("Give --out when using --text-file.")
+        out_dir = a.out
+        workspace, kit = os.path.dirname(os.path.abspath(a.out)), brand.load()
+    else:
+        fail("Give --project or --text-file.")
+    text = read_text(source).strip()
+    if len(text.split()) < 20:
+        fail("There is not enough text to work from.")
+    posts = draft(text, title, a.model, house_rules(workspace))
+    if not posts["linkedin"] or len(posts["thread"]) < 2 or len(posts["slides"]) < 2:
+        fail("The local model did not produce usable posts. Try another model, or use 'Polish with Claude Code'.")
+    write_out(posts, out_dir, kit, title)
+    log(f"LinkedIn post: {len(posts['linkedin'].split())} words | X thread: {len(posts['thread'])} posts | "
+        f"carousel: {len(posts['slides'])} slides")
+    log(f"SOCIAL POSTS: {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['ytimport.py'] = @'
+"""Download your own YouTube videos into the episode folder and add them to the footage index.
+
+  python ytimport.py --url <video, playlist or channel link> --dest <workspace>/episodes --lib <workspace>/library [--max 5]
+
+Only use this for videos you own or have permission to reuse.
+"""
+import argparse
+import os
+import shutil
+import subprocess
+
+from common import ensure_dir, fail, log
+
+
+def command(url, dest, limit):
+    """The yt-dlp command: best MP4 up to 1080p, skipping anything already downloaded."""
+    return ["yt-dlp", "--no-warnings", "--ignore-errors", "--playlist-end", str(limit),
+            "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b[height<=1080]/b",
+            "--merge-output-format", "mp4", "--restrict-filenames",
+            "--download-archive", os.path.join(dest, "downloaded.txt"),
+            "-o", os.path.join(dest, "%(upload_date)s-%(title).80s-%(id)s.%(ext)s"), url]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--dest", required=True)
+    ap.add_argument("--lib", required=True)
+    ap.add_argument("--max", type=int, default=5, dest="limit", help="Most videos to take from a playlist or channel")
+    ap.add_argument("--no-index", action="store_true")
+    a = ap.parse_args()
+    if not a.url.lower().startswith("http"):
+        fail("Paste a full YouTube link.")
+    if not shutil.which("yt-dlp"):
+        fail("yt-dlp is not installed. Re-run Setup-PodcastStudio.ps1.")
+    dest = ensure_dir(os.path.abspath(a.dest))
+    before = {f for f in os.listdir(dest) if f.lower().endswith(".mp4")}
+    log(f"Downloading up to {a.limit} video(s) into {dest} ...")
+    subprocess.run(command(a.url, dest, max(1, a.limit)))
+    new = sorted({f for f in os.listdir(dest) if f.lower().endswith(".mp4")} - before)
+    if not new and not before:
+        fail("Nothing was downloaded. Check the link, and that the video is public or unlisted.")
+    log(f"{len(new)} new video(s): " + (", ".join(new) if new else "none (already downloaded)"))
+    if not a.no_index:
+        import library
+        library.index(dest, os.path.abspath(a.lib))
+    log(f"EPISODES: {dest}")
+
+
+if __name__ == "__main__":
+    main()
+'@
 $files['captions.py'] = @'
 """Transcribe a video/audio file to .srt and .txt with faster-whisper."""
 import argparse
@@ -4846,13 +5383,18 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
 - `style-bible.md` - the show's distilled style; the outline and script stages read it when present
-- `brand.json` - colours, font and logo for cards, captions and the corner logo (a project can hold its own copy)
+- `house-rules.md` - lasting corrections. Read it before any script, edit or post and follow every rule. When the user gives a note about an edit, add it here as one short rule.
+- `brand.json` - colours, font, logo and optional music bed for cards, captions and the corner logo (a project can hold its own copy)
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
 - One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
 - Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
 - Quality gate: `python ..\app\qa.py --project projects\x`
+- Prepare a raw recording for the Herk Edit Kit: `python ..\app\recording.py prepare --recording take.mp4 --slug my-take` (kit lives in `..\repos\herk-edit-kit`; edit there with its `short-form-edit` or `edit-video` skill)
+- Quick silence trim, no AI: `python ..\app\recording.py tighten --recording take.mp4`
+- Social posts from a project: `python ..\app\repurpose.py --project projects\x` (drafts in `projects\x\social`)
+- Import your own YouTube videos: `python ..\app\ytimport.py --url <link> --dest episodes --lib library`
 - Highlights (clips cut straight from an episode): `python ..\app\highlights.py --lib library --episode <file> --out highlights --count 5 --framing speaker`
 - Who is speaking: `python ..\app\speaker.py <video> --start 10 --seconds 8` (LR-ASD, CPU)
 - Compare local models and set the default: `python ..\app\modelbench.py --workspace . --save`
