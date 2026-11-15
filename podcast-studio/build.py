@@ -27,6 +27,15 @@ for name in order:
             raise SystemExit(f"{name}:{i} starts with '@ - would break the here-string")
     blocks.append(f"$files['{name}'] = @'\n{text.rstrip()}\n'@")
 
+# the user guide ships with the app as a stand-alone, offline page (source: guide/guide.html)
+sys.path.insert(0, str(here / "guide"))
+import make_guide  # noqa: E402
+
+guide = make_guide.build()
+if any(line.startswith("'@") for line in guide.split("\n")):
+    raise SystemExit("guide.html has a line starting with '@ - would break the here-string")
+blocks.append(f"$files['guide.html'] = @'\n{guide.rstrip()}\n'@")
+
 # small binary files (the face-detector model) travel inside the installer as base64
 import base64
 import textwrap

@@ -139,7 +139,7 @@ $log.Anchor = 'Top,Bottom,Left,Right'
 $form.Controls.Add($log)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Location = New-Object System.Drawing.Point(8, 488); $status.Size = New-Object System.Drawing.Size(560, 24)
+$status.Location = New-Object System.Drawing.Point(8, 488); $status.Size = New-Object System.Drawing.Size(450, 24)
 $status.Text = 'Ready.'
 $form.Controls.Add($status)
 
@@ -232,6 +232,11 @@ function Run-Py([string]$label, [string]$script, [string[]]$argv, [scriptblock]$
     Start-Job2 $label $Py (@('-u', (Join-Path $App $script)) + $argv) $onDone
 }
 
+$Guide = Join-Path $App 'guide.html'
+$btnGuide = Add-Button $form 'Guide' 465 484 105
+$btnGuide.Add_Click({
+    if (Test-Path $Guide) { Start-Process $Guide } else { Msg "The guide is missing ($Guide). Re-run Setup-PodcastStudio.ps1." }
+})
 $btnStop = Add-Button $form 'Stop job' 580 484 110
 $btnStop.Add_Click({
     if ($script:proc -and -not $script:proc.HasExited) {
@@ -1537,6 +1542,14 @@ Check 'services are off by default and save per project' {
     if ($script:connFileBackup.had) { [System.IO.File]::WriteAllText($f, $script:connFileBackup.text) } else { Remove-Item $f -Force }
     Update-Connections
     'off by default, only connected services tickable, saved per project, rules reach the prompt, tasks refuse when off'
+}
+Check 'guide ships with the app' {
+    Expect (Test-Path $Guide) "guide.html is missing from $App"
+    $html = [System.IO.File]::ReadAllText($Guide)
+    Expect ($html -match '<!doctype html>' -and $html -match '<title>Podcast Studio Guide</title>') 'guide.html is not a complete page'
+    Expect ($html -notmatch 'fonts\.googleapis') 'the guide must work offline'
+    Expect ($btnGuide.Text -eq 'Guide') 'Guide button missing'
+    "$([math]::Round($html.Length / 1024)) KB"
 }
 Check 'argument quoting' {
     Expect ((Q 'plain') -eq 'plain') 'plain value changed'

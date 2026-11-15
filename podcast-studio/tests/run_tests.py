@@ -9,8 +9,8 @@ import glob
 import json
 import os
 import shutil
-import subprocess
 import sys
+import subprocess
 import tempfile
 import time
 
@@ -982,6 +982,21 @@ def manual_assemble_with_music_and_plain_captions():
     d = float(sh("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", out))
     assert 4.7 < d < 5.4, d
     assert os.path.exists(os.path.splitext(out)[0] + ".srt")
+
+
+@test
+def guide_ships_offline():
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "guide"))
+    import make_guide
+    page = make_guide.build()
+    assert page.startswith("<!doctype html>") and '<meta charset="utf-8">' in page and page.rstrip().endswith("</html>")
+    assert "<title>Podcast Studio Guide</title>" in page and page.count("<title>") == 1
+    assert "fonts.googleapis" not in page and "claude:viewport" not in page, "the shipped guide must work offline"
+    assert "https://" not in page.split("<script>")[1], "the checklist script must not load anything"
+    for anchor in ("uc-setup", "uc-new-video", "uc-recording", "uc-long", "uc-connect", "uc-riverside", "uc-services", "checklist"):
+        assert f'id="{anchor}"' in page, anchor
+    installer = open(os.path.join(os.path.dirname(HERE), "installer.template.ps1"), encoding="utf-8").read()
+    assert "Podcast Studio Guide.lnk" in installer
 
 
 @test

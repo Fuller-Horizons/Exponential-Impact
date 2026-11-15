@@ -122,6 +122,11 @@ Each paid step quotes its cost and waits for a yes, and every paid call is writt
 Upstream repos are checked out at fixed commits and Python packages are pinned; the first install writes
 `requirements.lock` and re-runs reuse it. `-Upgrade` moves to the latest.
 
+## Guide
+The step-by-step guide installs with the app: press **Guide** at the bottom of the window, or use the
+**Podcast Studio Guide** desktop shortcut. It works offline. Its source is `guide/guide.html` (the same file is
+published online); `build.py` turns it into the stand-alone `app\guide.html`.
+
 ## Development
 Edit files in `src/` or `installer.template.ps1`, then run `python build.py`. It runs `tests/run_tests.py`
 (unit tests plus a full prompt-to-video run with stand-ins for the AI models, and a static PowerShell

@@ -368,6 +368,14 @@ $sc.WorkingDirectory = $appDir
 $sc.IconLocation = 'shell32.dll,115'
 $sc.Save()
 Ok "Desktop shortcut: $lnk"
+$guide = Join-Path $appDir 'guide.html'
+if (Test-Path $guide) {
+    $gl = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Podcast Studio Guide.lnk'))
+    $gl.TargetPath = $guide
+    $gl.IconLocation = 'shell32.dll,23'
+    $gl.Save()
+    Ok 'Desktop shortcut: Podcast Studio Guide'
+}
 
 # ------------------------------------------------------------------ 10. self-test
 Step 'Self-test (syntax, tools, packages, GPU, local model, render)'
