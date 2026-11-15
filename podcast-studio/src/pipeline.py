@@ -44,7 +44,15 @@ def library_dir(cfg, project):
 
 
 # ------------------------------------------------------------------ stage: outline
+OUTLINE_SCHEMA = {"type": "object", "required": ["title", "hooks", "beats", "cta"], "properties": {
+    "title": {"type": "string"},
+    "hooks": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+    "beats": {"type": "array", "items": {"type": "string"}},
+    "cta": {"type": "string"}}}
+
+
 def stage_outline(project, cfg, force):
+    """Draft outline.txt plus hooks.json (three opening lines to choose from)."""
     import llm
 
     out = os.path.join(project, "outline.txt")
@@ -52,19 +60,33 @@ def stage_outline(project, cfg, force):
         log("outline.txt exists - keeping it (use --force to redraft)")
         return
     bible = style_bible(project)
-    system = ("You plan short videos for a podcast. Be concrete and punchy. Plain text only, no markdown."
+    system = ("You plan short videos for a podcast. Be concrete and punchy. No markdown."
               + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
-    user = (f"Write an outline for a {cfg['seconds']}-second video about:\n{cfg['prompt']}\n\n"
-            "Use exactly this layout:\n"
-            "TITLE: <max 8 words>\n"
-            "HOOK: <the opening line, said in the first 3 seconds>\n"
-            "BEATS:\n1. <one line>\n2. <one line>\n(4 to 7 beats)\n"
-            "CTA: <closing line>")
-    t0 = time.time()
-    text = llm.chat(system, user, cfg["model"])
+    ask = f"Plan a {cfg['seconds']}-second video about:\n{cfg['prompt']}\n\n"
+    t0, hooks, text = time.time(), [], ""
+    try:
+        plan = llm.chat(system, ask + "Return JSON with: \"title\" (max 8 words), \"hooks\" (exactly 3 different "
+                        "opening lines, each said in the first 3 seconds: one a bold claim, one a question, one a "
+                        "short story opener), \"beats\" (4 to 7 one-line points), \"cta\" (closing line).",
+                        cfg["model"], schema=OUTLINE_SCHEMA)
+        hooks = [" ".join(str(h).split()) for h in plan.get("hooks") or [] if str(h).strip()][:3]
+        beats = [" ".join(str(b).split()) for b in plan.get("beats") or [] if str(b).strip()]
+        if hooks and len(beats) >= 3:
+            text = (f"TITLE: {plan.get('title', '').strip()}\nHOOK: {hooks[0]}\nBEATS:\n"
+                    + "\n".join(f"{n}. {b}" for n, b in enumerate(beats, 1)) + f"\nCTA: {plan.get('cta', '').strip()}")
+    except Exception as e:  # noqa: BLE001 - fall back to a plain-text outline
+        log(f"  structured outline failed ({e}); asking for plain text")
+    if not text:
+        hooks = []
+        text = llm.chat(system, ask + "Use exactly this layout, plain text only:\nTITLE: <max 8 words>\n"
+                        "HOOK: <the opening line, said in the first 3 seconds>\nBEATS:\n1. <one line>\n2. <one line>\n"
+                        "(4 to 7 beats)\nCTA: <closing line>", cfg["model"])
     write_text(out, text.strip() + "\n")
-    record_metric(project, "outline", seconds=round(time.time() - t0, 1), model=cfg["model"])
+    write_json(os.path.join(project, "hooks.json"), hooks)
+    record_metric(project, "outline", seconds=round(time.time() - t0, 1), model=cfg["model"], hooks=len(hooks))
     log(f"Outline saved: {out}\n\n{text}\n")
+    if len(hooks) > 1:
+        log("Other hooks to choose from:\n" + "\n".join(f"  - {h}" for h in hooks[1:]))
 
 
 # ------------------------------------------------------------------ stage: script
@@ -217,6 +239,38 @@ def stage_script(project, cfg, force):
 
 
 # ------------------------------------------------------------------ stage: voice
+def repair_voice(voice, lines, threshold=0.6, tries=2):
+    """Listen back to each new line (speech-to-text on the CPU) and re-make garbled ones, keeping the best take."""
+    from common import speech_match
+
+    retried, still_bad = [], []
+    try:
+        for i, s, wav in lines:
+            best = speech_match(wav, s["narration"], device="cpu")
+            for attempt in range(tries):
+                if best >= threshold:
+                    break
+                log(f"  line {i} sounds wrong ({best:.0%} of words heard) - re-making, try {attempt + 1}")
+                if i not in retried:
+                    retried.append(i)
+                backup = wav + ".prev"
+                os.replace(wav, backup)
+                voice.speak(s["narration"], wav, pause=0.15)
+                score = speech_match(wav, s["narration"], device="cpu")
+                if score > best:
+                    best = score
+                    os.remove(backup)
+                else:
+                    os.replace(backup, wav)
+            if best < threshold:
+                still_bad.append(i)
+    except Exception as e:  # noqa: BLE001 - the check is a bonus, never a blocker
+        log(f"  voice check skipped ({e})")
+    if retried:
+        log(f"Voice check: re-made lines {retried}; still unclear: {still_bad or 'none'}")
+    return retried, still_bad
+
+
 def stage_voice(project, cfg, force):
     script = read_json(os.path.join(project, "script.json"))
     if not script:
@@ -244,18 +298,22 @@ def stage_voice(project, cfg, force):
     for i, s, wav in todo:
         log(f"[voice {i}/{len(script['scenes'])}] {s['narration'][:70]}")
         voice.speak(s["narration"], wav, pause=0.15)
+    retried, still_bad = repair_voice(voice, todo) if cfg.get("voice_check", True) else ([], [])
     record_metric(project, "voice", seconds=round(time.time() - t0, 1), torch_peak_mb=voice.peak_mb(),
-                  gpu_used_before_mb=before, gpu_used_after_mb=gpu_used_mb(), dtype=str(voice.dtype))
+                  gpu_used_before_mb=before, gpu_used_after_mb=gpu_used_mb(), dtype=str(voice.dtype),
+                  lines_retried=retried, lines_still_unclear=still_bad)
     log(f"Voice done. Peak VRAM (torch): {voice.peak_mb()} MiB")
 
 
 # ------------------------------------------------------------------ stage: visuals
 def stage_visuals(project, cfg, force):
+    import brand
     import visuals
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json - run the script stage first.")
+    kit = brand.load(project)
     fmt = cfg["format"]
     vdir = ensure_dir(os.path.join(project, "visuals"))
     stills, t0 = None, time.time()
@@ -279,7 +337,8 @@ def stage_visuals(project, cfg, force):
                 if not src or not os.path.exists(src["file"]):
                     raise RuntimeError("source footage is missing")
                 log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
-                visuals.footage_clip(src["file"], src["start"], out, secs, fmt, audio=kind == "soundbite")
+                s["framing"] = visuals.footage_clip(src["file"], src["start"], out, secs, fmt,
+                                                    audio=kind == "soundbite")
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -294,7 +353,7 @@ def stage_visuals(project, cfg, force):
                 log(f"  {kind} failed ({e}) - using a text card instead")
             kind = s["visual"] = "card"
             text = s["card_text"] or " ".join(s["narration"].split()[:10])
-            visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None)
+            visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None, brand=kit)
         counts[kind] += 1
     write_json(os.path.join(project, "script.json"), script)
     record_metric(project, "visuals", seconds=round(time.time() - t0, 1), gpu_used_after_mb=gpu_used_mb(),
@@ -304,11 +363,13 @@ def stage_visuals(project, cfg, force):
 
 # ------------------------------------------------------------------ stage: render
 def stage_render(project, cfg, force):
+    import brand
     import subs
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json.")
+    kit = brand.load(project)
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
     enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
@@ -319,13 +380,18 @@ def stage_render(project, cfg, force):
         out = os.path.join(sdir, f"scene_{i:02}.mp4")
         if not os.path.exists(vis):
             fail(f"Missing {vis} - run the visuals stage first.")
-        if s["visual"] == "soundbite":
+        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+        inputs = [vis] if s["visual"] == "soundbite" else [vis, wav]
+        fresh = (not force and os.path.exists(out) and all(os.path.exists(p) for p in inputs)
+                 and os.path.getmtime(out) >= max(os.path.getmtime(p) for p in inputs))
+        if fresh:
+            pass
+        elif s["visual"] == "soundbite":
             secs = duration(vis)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
             run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
                       "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         else:
-            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
             if not os.path.exists(wav):
                 fail(f"Missing {wav} - run the voice stage first.")
             secs = duration(wav)
@@ -349,8 +415,12 @@ def stage_render(project, cfg, force):
     covered = 0.0
     if cfg.get("captions", True):
         ass = os.path.join(project, "captions.ass")
-        covered = subs.build_ass(words, W, H, ass)
+        covered = subs.build_ass(words, W, H, ass, font=brand.caption_font(kit),
+                                 highlight=brand.ass_colour(kit["caption_highlight"]),
+                                 uppercase=bool(kit["caption_uppercase"]))
         cmd += ["--ass", ass]
+    if kit["logo"] and os.path.exists(kit["logo"]):
+        cmd += ["--logo", kit["logo"], "--logo-position", kit["logo_position"]]
     if cfg.get("music") and os.path.exists(cfg["music"]):
         cmd += ["--music", cfg["music"]]
     run(cmd)
@@ -395,6 +465,7 @@ def main():
     ap.add_argument("--captions", choices=["on", "off"])
     ap.add_argument("--soundbites", choices=["on", "off"])
     ap.add_argument("--qa-listen", choices=["on", "off"], dest="qa_listen")
+    ap.add_argument("--voice-check", choices=["on", "off"], dest="voice_check")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -407,7 +478,7 @@ def main():
     for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
-    for key in ("stills", "captions", "soundbites", "qa_listen"):
+    for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key) == "on"
     if not cfg.get("prompt"):

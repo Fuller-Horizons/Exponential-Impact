@@ -106,27 +106,47 @@ def _expose_torch_cuda_dlls():
             pass
 
 
-def transcribe(path, model_size="small", language=None, words=False):
+_whisper = {}
+
+
+def transcribe(path, model_size="small", language=None, device=None):
     """Transcribe with faster-whisper. Tries the GPU first, falls back to CPU int8.
 
+    `device="cpu"` skips the GPU (used while another model is holding the VRAM).
     Returns [(start, end, text)].
     """
     _expose_torch_cuda_dlls()
     from faster_whisper import WhisperModel
 
+    attempts = (("cuda", "int8_float16"), ("cuda", "int8"), ("cpu", "int8"))
+    if device == "cpu":
+        attempts = attempts[2:]
     last = None
-    for device, compute in (("cuda", "int8_float16"), ("cuda", "int8"), ("cpu", "int8")):
+    for dev, compute in attempts:
+        key = (model_size, dev, compute)
         try:
-            log(f"Transcribing on {device} ({compute}) with whisper-{model_size}...")
-            model = WhisperModel(model_size, device=device, compute_type=compute)
-            segments, info = model.transcribe(path, language=language, vad_filter=True)
-            segs = [(s.start, s.end, s.text.strip()) for s in segments]
-            log(f"  language: {info.language}, segments: {len(segs)}, device: {device}")
-            return segs
+            if key not in _whisper:
+                log(f"Loading whisper-{model_size} on {dev} ({compute})...")
+                _whisper[key] = WhisperModel(model_size, device=dev, compute_type=compute)
+            segments, info = _whisper[key].transcribe(path, language=language, vad_filter=True)
+            return [(s.start, s.end, s.text.strip()) for s in segments]
         except Exception as e:  # missing CUDA DLLs, OOM, etc.
+            _whisper.pop(key, None)
             last = e
-            log(f"  {device}/{compute} failed: {e}")
+            log(f"  {dev}/{compute} failed: {e}")
     raise RuntimeError(f"Transcription failed: {last}")
+
+
+def _plain_words(text):
+    import re
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def speech_match(wav, text, device=None):
+    """Share of the script's words that speech-to-text hears in `wav` (0-1). Catches garbled speech."""
+    want = _plain_words(text)
+    heard = set(_plain_words(" ".join(t for _, _, t in transcribe(wav, device=device))))
+    return sum(1 for w in want if w in heard) / (len(want) or 1)
 
 
 def srt_time(t):

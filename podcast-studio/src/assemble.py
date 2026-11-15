@@ -25,10 +25,12 @@ def main():
     ap.add_argument("--format", default="9:16", choices=list(FORMATS))
     ap.add_argument("--captions", action="store_true", help="Transcribe and burn in plain captions")
     ap.add_argument("--ass", help="Burn in this prepared ASS caption file instead of transcribing")
+    ap.add_argument("--logo", help="PNG shown in a corner of the whole video")
+    ap.add_argument("--logo-position", default="top-right", choices=["top-right", "top-left"])
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    for c in a.clips + [p for p in (a.voice, a.music, a.ass) if p]:
+    for c in a.clips + [p for p in (a.voice, a.music, a.ass, a.logo) if p]:
         if not os.path.exists(c):
             fail(f"Missing file: {c}")
     W, H = FORMATS[a.format]
@@ -79,15 +81,26 @@ def main():
         graph = []
         if a.music:
             cmd += ["-stream_loop", "-1", "-i", os.path.abspath(a.music)]
+            music = n
+            n += 1
             graph += [f"{speech}aresample=48000,asplit=2[sp][key]",
-                      f"[{n}:a]aresample=48000,volume={a.music_volume}[mu]",
+                      f"[{music}:a]aresample=48000,volume={a.music_volume}[mu]",
                       "[mu][key]sidechaincompress=threshold=0.03:ratio=10:attack=15:release=350[duck]",
                       f"[sp][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{LOUDNESS}[aout]"]
         else:
             graph.append(f"{speech}{LOUDNESS}[aout]")
+        picture = "[0:v]"
         if vfilter:
-            graph.append(f"[0:v]{vfilter}[vout]")
-            cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]",
+            graph.append(f"{picture}{vfilter}[capt]")
+            picture = "[capt]"
+        if a.logo:
+            cmd += ["-i", os.path.abspath(a.logo)]
+            pad = int(W * 0.04)
+            x = pad if a.logo_position == "top-left" else f"W-w-{pad}"
+            graph += [f"[{n}:v]scale={int(W * 0.16)}:-1[logo]", f"{picture}[logo]overlay={x}:{pad}[branded]"]
+            picture = "[branded]"
+        if picture != "[0:v]":
+            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
         else:
             cmd += ["-filter_complex", ";".join(graph), "-map", "0:v", "-map", "[aout]", "-c:v", "copy"]

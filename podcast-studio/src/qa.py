@@ -24,21 +24,15 @@ def ffmpeg_report(path, *filters):
     return out.stderr
 
 
-def _words(text):
-    return re.findall(r"[a-z0-9']+", text.lower())
-
-
 def listen(project, script):
     """Transcribe each voice line and compare it with the script (catches garbled speech)."""
-    from common import transcribe
+    from common import speech_match
     bad, scores = [], []
     for i, s in enumerate(script["scenes"], 1):
         wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
         if s["visual"] == "soundbite" or not os.path.exists(wav):
             continue
-        want = _words(s["narration"])
-        heard = set(_words(" ".join(t for _, _, t in transcribe(wav))))
-        score = sum(1 for w in want if w in heard) / (len(want) or 1)
+        score = speech_match(wav, s["narration"])
         scores.append(score)
         if score < 0.6:
             bad.append(f"scene {i} ({score:.0%})")
@@ -46,7 +40,7 @@ def listen(project, script):
         return add("voice matches script", "skip", "no voice lines")
     avg = sum(scores) / len(scores)
     add("voice matches script", "warn" if bad else "pass",
-        f"average {avg:.0%} of script words heard" + (f"; re-make: {', '.join(bad)}" if bad else ""))
+        f"average {avg:.0%} of script words heard" + (f"; re-make in the Scenes tab: {', '.join(bad)}" if bad else ""))
 
 
 def main():

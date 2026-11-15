@@ -20,6 +20,10 @@ GOOD = {"title": "Cash Flow Wins", "scenes": [
 SHORT = {"title": "Too Short", "scenes": [{"narration": "Cash matters.", "visual": "card"},
                                           {"narration": "Watch it.", "visual": "card"},
                                           {"narration": "Follow us.", "visual": "card"}]}
+PLAN = {"title": "Cash Flow Wins", "hooks": ["You run out of cash, not ideas.",
+                                             "What kills more businesses than bad ideas?",
+                                             "Last year a friend closed her shop with a full order book."],
+        "beats": ["a", "b", "c", "d"], "cta": "Follow."}
 OUTLINE = "TITLE: Cash Flow Wins\nHOOK: You run out of cash, not ideas.\nBEATS:\n1. a\n2. b\n3. c\n4. d\nCTA: Follow."
 state = {"chats": 0, "script_calls": 0, "schema_seen": False}
 
@@ -48,7 +52,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         state["chats"] += 1
         fmt = req.get("format")
         user = req["messages"][-1]["content"]
-        if fmt:
+        if isinstance(fmt, dict) and "hooks" in fmt.get("properties", {}):
+            content = json.dumps(PLAN)
+        elif fmt:
             state["schema_seen"] = state["schema_seen"] or isinstance(fmt, dict)
             state["script_calls"] += 1
             content = json.dumps(SHORT if "Your last draft" not in user else GOOD)

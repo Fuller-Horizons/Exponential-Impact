@@ -103,6 +103,12 @@ class Library:
     def __len__(self):
         return len(self.chunks)
 
+    def mark_used(self, file, start):
+        """Exclude the chunk that contains this moment from later searches."""
+        for c in self.chunks:
+            if c["file"] == file and c["start"] - 0.01 <= start < max(c["end"], c["start"] + 0.02):
+                self.used.add((c["file"], c["start"]))
+
     def search(self, query, avoid_reuse=True):
         """Best matching chunk for `query`, or None. Meaning search first, keyword overlap as fallback."""
         if not self.chunks:

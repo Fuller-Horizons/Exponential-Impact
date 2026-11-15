@@ -23,6 +23,14 @@ The installer ends with a self-test and writes `logs\selftest.json`.
    AI still. Captions highlight word by word; audio is normalised and music is lowered under speech.
 4. If a stage fails, press step 2 again: finished work is kept. Editing the outline rebuilds everything after it.
 
+The outline step offers three hooks to pick from. **Brand kit...** sets the show's colours, font and logo once
+(`workspace\brand.json`). Garbled voice lines are detected and re-made automatically, up to twice.
+
+## Scenes tab: fix one scene
+Load the project's scenes, change a scene's type, narration, search words or card text, and press **Save scene**.
+**Apply changes + re-make video** rebuilds only what changed. **Re-make this scene** gives a new voice take and,
+for footage or soundbites, the next best matching moment. Scenes can be added or deleted.
+
 Each video lives in `workspace\projects\<name>\`; `metrics.json` records timings and peak VRAM, and
 `qa.json` holds the quality report. **Build style bible (local)** in the Analyze tab writes
 `workspace\style-bible.md` from the indexed episodes; the outline and script steps read it.

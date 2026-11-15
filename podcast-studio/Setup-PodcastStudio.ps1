@@ -462,7 +462,8 @@ function Get-ProjectArgs([string]$dir, [string]$stage) {
     [System.IO.File]::WriteAllText((Join-Path $dir 'prompt.txt'), $cPrompt.Text)
     $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
         '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
-        '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }))
+        '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }),
+        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }))
     if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
     return $argv
 }
@@ -475,6 +476,12 @@ $b.Add_Click({
     Run-Py 'Draft outline (local model)' 'pipeline.py' ((Get-ProjectArgs $dir 'outline') + '--force') {
         $f = Join-Path $script:ctx.dir 'outline.txt'
         if (Test-Path $f) { $cOutline.Text = ([System.IO.File]::ReadAllText($f) -replace "`r?`n", "`r`n") }
+        $cHook.Items.Clear()
+        $h = Join-Path $script:ctx.dir 'hooks.json'
+        if (Test-Path $h) {
+            foreach ($x in @([System.IO.File]::ReadAllText($h) | ConvertFrom-Json)) { if ($x) { [void]$cHook.Items.Add([string]$x) } }
+            if ($cHook.Items.Count -gt 0) { $cHook.SelectedIndex = 0 }
+        }
     }
 })
 $b = Add-Button $t0 '2. Approve + make video' 310 180 190
@@ -487,6 +494,7 @@ $b.Add_Click({
     Run-Py 'Make video (script, voice, visuals, render)' 'pipeline.py' (Get-ProjectArgs $dir 'all') {
         $f = Join-Path $script:ctx.dir 'final.mp4'
         if (Test-Path $f) { $script:lastFinal = $f; Start-Process explorer.exe "/select,`"$f`"" }
+        Load-Scenes $true
     }
 })
 $b = Add-Button $t0 'Open project' 510 180 120
@@ -499,10 +507,214 @@ $b = Add-Button $t0 'Full self-test' 750 180 160
 $b.Add_Click({
     Start-Job2 'Self-test (full: loads models, measures VRAM)' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $App 'Test-PodcastStudio.ps1'), '-Full', '-Model', $cModel.Text)
 })
-Add-Label $t0 'Outline (editable)' 10 220 | Out-Null
-$cOutline = Add-Text $t0 150 220 760 '' 185
+Add-Label $t0 'Hook (pick one)' 10 218 | Out-Null
+$cHook = New-Object System.Windows.Forms.ComboBox
+$cHook.DropDownStyle = 'DropDownList'
+$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(520, 24)
+$t0.Controls.Add($cHook)
+$cHook.Add_SelectedIndexChanged({
+    if ($cHook.SelectedIndex -lt 0) { return }
+    $lines = $cOutline.Text -split "`r?`n"
+    for ($k = 0; $k -lt $lines.Count; $k++) {
+        if ($lines[$k] -match '^\s*HOOK:') {
+            $lines[$k] = 'HOOK: ' + [string]$cHook.SelectedItem
+            $cOutline.Text = $lines -join "`r`n"
+            break
+        }
+    }
+})
+$cBites = New-Object System.Windows.Forms.CheckBox
+$cBites.Text = 'Soundbites'; $cBites.Checked = $true
+$cBites.Location = New-Object System.Drawing.Point(685, 218); $cBites.Size = New-Object System.Drawing.Size(105, 24)
+$t0.Controls.Add($cBites)
+$b = Add-Button $t0 'Brand kit...' 800 215 110
+$b.Add_Click({ Show-BrandKit })
+Add-Label $t0 'Outline (editable)' 10 252 | Out-Null
+$cOutline = Add-Text $t0 150 252 760 '' 153
 $n0 = Add-Label $t0 'Runs fully on this PC: a local model writes the outline and script, your cloned voice narrates, and scenes use real soundbites and footage from your indexed episodes, text cards and optional AI stills. Ends with a quality report (qa.json). A failed run resumes: press step 2 again.' 150 408 760
 $n0.Size = New-Object System.Drawing.Size(760, 34)
+
+# ---------------------------------------------------------------- brand kit dialog (workspace\brand.json)
+function Show-BrandKit {
+    $path = Join-Path $Work 'brand.json'
+    $kit = @{ accent = '#FFC400'; background = '#20223E'; text = '#FFFFFF'; caption_highlight = '#FFD700'
+              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right' }
+    if (Test-Path $path) {
+        try {
+            $saved = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+            foreach ($k in @($kit.Keys)) { if ($null -ne $saved.$k -and "$($saved.$k)" -ne '') { $kit[$k] = $saved.$k } }
+        } catch { }
+    }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 400); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $pick = {
+        $d = New-Object System.Windows.Forms.ColorDialog
+        $d.Color = $this.BackColor; $d.FullOpen = $true
+        if ($d.ShowDialog() -eq 'OK') { $this.BackColor = $d.Color }
+    }
+    $swatches = @{}
+    $y = 18
+    foreach ($row in @(@('accent', 'Accent colour (bar, title)'), @('background', 'Card background'), @('text', 'Card text'),
+                       @('caption_highlight', 'Caption highlight'))) {
+        Add-Label $f $row[1] 20 $y 200 | Out-Null
+        $sw = New-Object System.Windows.Forms.Button
+        $sw.Location = New-Object System.Drawing.Point(230, $y); $sw.Size = New-Object System.Drawing.Size(120, 26)
+        $sw.FlatStyle = 'Flat'
+        try { $sw.BackColor = [System.Drawing.ColorTranslator]::FromHtml([string]$kit[$row[0]]) } catch { $sw.BackColor = [System.Drawing.Color]::White }
+        $sw.Add_Click($pick)
+        $f.Controls.Add($sw); $swatches[$row[0]] = $sw
+        $y += 36
+    }
+    Add-Label $f 'Font' 20 $y 200 | Out-Null
+    $font = Add-Combo $f 230 $y 200 @('Segoe UI', 'Arial', 'Impact', 'Bahnschrift', 'Georgia', 'Verdana', 'Trebuchet MS')
+    if ($font.Items.Contains([string]$kit.font)) { $font.SelectedItem = [string]$kit.font }
+    $y += 36
+    $upper = New-Object System.Windows.Forms.CheckBox
+    $upper.Text = 'Captions in CAPITALS'; $upper.Checked = [bool]$kit.caption_uppercase
+    $upper.Location = New-Object System.Drawing.Point(230, $y); $upper.Size = New-Object System.Drawing.Size(220, 24)
+    $f.Controls.Add($upper)
+    $y += 36
+    Add-Label $f 'Logo (PNG, optional)' 20 $y 200 | Out-Null
+    $logo = Add-Text $f 230 $y 170 ([string]$kit.logo)
+    $lb = Add-Button $f '...' 405 ($y - 2) 35
+    $lb.Tag = $logo
+    $lb.Add_Click({ $p = Pick-File 'Image|*.png;*.jpg;*.jpeg|All files|*.*' $Work; if ($p) { $this.Tag.Text = $p } })
+    $lc = Add-Button $f 'Clear' 445 ($y - 2) 50
+    $lc.Tag = $logo
+    $lc.Add_Click({ $this.Tag.Text = '' })
+    $y += 36
+    Add-Label $f 'Logo corner' 20 $y 200 | Out-Null
+    $pos = Add-Combo $f 230 $y 120 @('top-right', 'top-left')
+    if ($pos.Items.Contains([string]$kit.logo_position)) { $pos.SelectedItem = [string]$kit.logo_position }
+    $ok = Add-Button $f 'Save' 300 310 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
+    $cancel = Add-Button $f 'Cancel' 400 310 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($f.ShowDialog($form) -ne 'OK') { return }
+    $out = [ordered]@{}
+    foreach ($k in 'accent', 'background', 'text', 'caption_highlight') {
+        $c = $swatches[$k].BackColor
+        $out[$k] = '#{0:X2}{1:X2}{2:X2}' -f $c.R, $c.G, $c.B
+    }
+    $out['font'] = [string]$font.SelectedItem
+    $out['caption_uppercase'] = [bool]$upper.Checked
+    $out['logo'] = $logo.Text
+    $out['logo_position'] = [string]$pos.SelectedItem
+    [System.IO.File]::WriteAllText($path, ($out | ConvertTo-Json))
+    Log "Brand kit saved: $path (used by the next video you make)"
+}
+
+# ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
+$tS = New-Tab 'Scenes (edit)'
+$script:sceneData = @()
+$b = Add-Button $tS 'Load scenes' 10 10 120
+$b.Add_Click({ Load-Scenes $false })
+$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 760
+$eList = New-Object System.Windows.Forms.ListBox
+$eList.Location = New-Object System.Drawing.Point(10, 45); $eList.Size = New-Object System.Drawing.Size(340, 340)
+$eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tS.Controls.Add($eList)
+Add-Label $tS 'Type' 365 45 90 | Out-Null
+$eType = Add-Combo $tS 460 45 150 @('card', 'footage', 'soundbite', 'still')
+Add-Label $tS 'Narration' 365 80 90 | Out-Null
+$eNarr = Add-Text $tS 460 80 450 '' 95
+Add-Label $tS 'Search words' 365 183 90 | Out-Null
+$eQuery = Add-Text $tS 460 183 450
+Add-Label $tS 'Card text' 365 218 90 | Out-Null
+$eCard = Add-Text $tS 460 218 450
+Add-Label $tS 'Image prompt' 365 253 90 | Out-Null
+$eImg = Add-Text $tS 460 253 450
+
+function Load-Scenes([bool]$quiet) {
+    $dir = Get-Project; if (-not $dir) { return }
+    $keep = $eList.SelectedIndex
+    $eList.Items.Clear(); $script:sceneData = @()
+    $file = Join-Path $dir 'script.json'
+    if (-not (Test-Path $file)) {
+        if (-not $quiet) { Msg 'This project has no script yet. Make the video first (Create tab, step 2).' }
+        return
+    }
+    try { $doc = [System.IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { Msg "Could not read $file"; return }
+    $script:sceneData = @($doc.scenes)
+    $n = 0
+    foreach ($sc in $script:sceneData) {
+        $n++
+        $t = if ($sc.narration) { [string]$sc.narration } else { "[soundbite] $($sc.query)" }
+        [void]$eList.Items.Add(('{0:00} {1,-9} {2}' -f $n, $sc.visual, $t))
+    }
+    $sInfo.Text = "Project: $(Split-Path $dir -Leaf)   |   $n scenes   |   $($doc.title)"
+    if ($keep -ge 0 -and $keep -lt $eList.Items.Count) { $eList.SelectedIndex = $keep }
+}
+function Get-SceneNumber {
+    if ($eList.SelectedIndex -lt 0) { Msg 'Load the scenes and pick one first.'; return 0 }
+    return $eList.SelectedIndex + 1
+}
+$eList.Add_SelectedIndexChanged({
+    $i = $eList.SelectedIndex
+    if ($i -lt 0 -or $i -ge $script:sceneData.Count) { return }
+    $sc = $script:sceneData[$i]
+    if ($eType.Items.Contains([string]$sc.visual)) { $eType.SelectedItem = [string]$sc.visual }
+    $eNarr.Text = [string]$sc.narration; $eQuery.Text = [string]$sc.query
+    $eCard.Text = [string]$sc.card_text; $eImg.Text = [string]$sc.image_prompt
+})
+
+$b = Add-Button $tS 'Save scene' 460 295 105
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    $fields = [ordered]@{ narration = $eNarr.Text; visual = [string]$eType.SelectedItem; query = $eQuery.Text
+                          card_text = $eCard.Text; image_prompt = $eImg.Text }
+    $edit = Join-Path $dir 'edit.json'
+    [System.IO.File]::WriteAllText($edit, ($fields | ConvertTo-Json))
+    Run-Py "Save scene $n" 'scenes.py' @('set', '--project', $dir, '--index', "$n", '--fields-file', $edit) { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Re-make this scene' 573 295 150
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    $script:ctx = @{ dir = $dir }
+    Run-Py "Re-make scene $n" 'scenes.py' @('remake', '--project', $dir, '--index', "$n") {
+        Run-Py 'Re-make video (only what changed)' 'pipeline.py' @('--project', $script:ctx.dir, '--stage', 'all') { Load-Scenes $true }
+    }
+})
+$b = Add-Button $tS 'Add after' 731 295 85
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py "Add scene after $n" 'scenes.py' @('add', '--project', $dir, '--index', "$n") { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Delete' 824 295 86
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    if ([System.Windows.Forms.MessageBox]::Show("Delete scene $n?", 'Podcast Studio', 'YesNo') -ne 'Yes') { return }
+    Run-Py "Delete scene $n" 'scenes.py' @('delete', '--project', $dir, '--index', "$n") { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Apply changes + re-make video' 460 335 263
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $script:ctx = @{ dir = $dir }
+    Run-Py 'Re-make video (only what changed)' 'pipeline.py' @('--project', $dir, '--stage', 'all') {
+        $v = Join-Path $script:ctx.dir 'final.mp4'
+        if (Test-Path $v) { $script:lastFinal = $v }
+        Load-Scenes $true
+    }
+})
+$b = Add-Button $tS 'Play video' 731 335 85
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $v = Join-Path $dir 'final.mp4'
+    if (Test-Path $v) { Start-Process $v } else { Msg 'No finished video yet - press "Apply changes + re-make video".' }
+})
+$b = Add-Button $tS 'Quality report' 824 335 86
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $q = Join-Path $dir 'qa.json'
+    if (Test-Path $q) { Start-Process notepad.exe $q } else { Msg 'No quality report yet.' }
+})
+$nS = Add-Label $tS ('Save scene stores your edit; nothing is rebuilt until you press "Apply changes". Only edited scenes are re-made: changing ' +
+    'card text keeps the voice line, changing narration re-records it. "Re-make this scene" gives a new voice take and, for footage or ' +
+    'soundbites, the next best matching moment.') 365 378 545
+$nS.Size = New-Object System.Drawing.Size(545, 62)
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab '1 - Analyze'
@@ -887,27 +1099,47 @@ def _expose_torch_cuda_dlls():
             pass
 
 
-def transcribe(path, model_size="small", language=None, words=False):
+_whisper = {}
+
+
+def transcribe(path, model_size="small", language=None, device=None):
     """Transcribe with faster-whisper. Tries the GPU first, falls back to CPU int8.
 
+    `device="cpu"` skips the GPU (used while another model is holding the VRAM).
     Returns [(start, end, text)].
     """
     _expose_torch_cuda_dlls()
     from faster_whisper import WhisperModel
 
+    attempts = (("cuda", "int8_float16"), ("cuda", "int8"), ("cpu", "int8"))
+    if device == "cpu":
+        attempts = attempts[2:]
     last = None
-    for device, compute in (("cuda", "int8_float16"), ("cuda", "int8"), ("cpu", "int8")):
+    for dev, compute in attempts:
+        key = (model_size, dev, compute)
         try:
-            log(f"Transcribing on {device} ({compute}) with whisper-{model_size}...")
-            model = WhisperModel(model_size, device=device, compute_type=compute)
-            segments, info = model.transcribe(path, language=language, vad_filter=True)
-            segs = [(s.start, s.end, s.text.strip()) for s in segments]
-            log(f"  language: {info.language}, segments: {len(segs)}, device: {device}")
-            return segs
+            if key not in _whisper:
+                log(f"Loading whisper-{model_size} on {dev} ({compute})...")
+                _whisper[key] = WhisperModel(model_size, device=dev, compute_type=compute)
+            segments, info = _whisper[key].transcribe(path, language=language, vad_filter=True)
+            return [(s.start, s.end, s.text.strip()) for s in segments]
         except Exception as e:  # missing CUDA DLLs, OOM, etc.
+            _whisper.pop(key, None)
             last = e
-            log(f"  {device}/{compute} failed: {e}")
+            log(f"  {dev}/{compute} failed: {e}")
     raise RuntimeError(f"Transcription failed: {last}")
+
+
+def _plain_words(text):
+    import re
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def speech_match(wav, text, device=None):
+    """Share of the script's words that speech-to-text hears in `wav` (0-1). Catches garbled speech."""
+    want = _plain_words(text)
+    heard = set(_plain_words(" ".join(t for _, _, t in transcribe(wav, device=device))))
+    return sum(1 for w in want if w in heard) / (len(want) or 1)
 
 
 def srt_time(t):
@@ -1184,6 +1416,12 @@ class Library:
     def __len__(self):
         return len(self.chunks)
 
+    def mark_used(self, file, start):
+        """Exclude the chunk that contains this moment from later searches."""
+        for c in self.chunks:
+            if c["file"] == file and c["start"] - 0.01 <= start < max(c["end"], c["start"] + 0.02):
+                self.used.add((c["file"], c["start"]))
+
     def search(self, query, avoid_reuse=True):
         """Best matching chunk for `query`, or None. Meaning search first, keyword overlap as fallback."""
         if not self.chunks:
@@ -1245,32 +1483,35 @@ FONTS = [r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf",
 SD_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 
-def _font(size):
+def _font(size, preferred=()):
     from PIL import ImageFont
-    for path in FONTS:
+    for path in list(preferred) + FONTS:
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
 
-def card_image(text, out_png, fmt="9:16", kicker=None, accent=(255, 196, 0)):
-    """Render a title/quote card as a PNG: dark gradient, accent bar, centred wrapped text."""
+def card_image(text, out_png, fmt="9:16", kicker=None, brand=None):
+    """Render a title/quote card as a PNG in the brand colours: gradient, accent bar, centred wrapped text."""
     from PIL import Image, ImageDraw
 
+    import brand as brandkit
+
+    kit = brand or brandkit.load()
+    accent, ink, base = brandkit.rgb(kit["accent"]), brandkit.rgb(kit["text"]), brandkit.rgb(kit["background"], (32, 34, 62))
+    fonts = brandkit.font_files(kit)
     W, H = FORMATS[fmt]
-    img = Image.new("RGB", (W, H))
-    px = img.load()
-    for y in range(H):  # vertical gradient
-        t = y / H
-        row = (int(14 + 18 * t), int(16 + 14 * t), int(28 + 30 * t))
-        for x in range(W):
-            px[x, y] = row
+    column = Image.new("RGB", (1, H))
+    for y in range(H):  # darker at the top, the brand background colour at the bottom
+        t = 0.45 + 0.55 * y / H
+        column.putpixel((0, y), tuple(int(c * t) for c in base))
+    img = column.resize((W, H))
     draw = ImageDraw.Draw(img)
 
     text = " ".join(text.split())
     size = int(min(W, H) * (0.10 if len(text) < 40 else 0.075 if len(text) < 90 else 0.058))
     while True:
-        font = _font(size)
+        font = _font(size, fonts)
         per_line = max(8, int(W * 0.84 / (size * 0.56)))
         lines = textwrap.wrap(text, per_line) or [""]
         line_h = int(size * 1.25)
@@ -1283,13 +1524,13 @@ def card_image(text, out_png, fmt="9:16", kicker=None, accent=(255, 196, 0)):
     bar_w, bar_h = int(W * 0.12), max(6, int(size * 0.14))
     draw.rectangle([(W - bar_w) // 2, y - bar_h * 4, (W + bar_w) // 2, y - bar_h * 3], fill=accent)
     if kicker:
-        kf = _font(int(size * 0.45))
+        kf = _font(int(size * 0.45), fonts)
         kw = draw.textlength(kicker.upper(), font=kf)
         draw.text(((W - kw) // 2, y - bar_h * 4 - int(size * 0.8)), kicker.upper(), font=kf, fill=accent)
     for line in lines:
         w = draw.textlength(line, font=font)
         draw.text(((W - w) // 2 + 3, y + 3), line, font=font, fill=(0, 0, 0))
-        draw.text(((W - w) // 2, y), line, font=font, fill=(255, 255, 255))
+        draw.text(((W - w) // 2, y), line, font=font, fill=ink)
         y += line_h
     img.save(out_png)
     return out_png
@@ -1308,26 +1549,26 @@ def kenburns(image, out_mp4, seconds, fmt="9:16", zoom=0.10):
     return out_mp4
 
 
-def card_clip(text, out_mp4, seconds, fmt="9:16", kicker=None):
+def card_clip(text, out_mp4, seconds, fmt="9:16", kicker=None, brand=None):
     png = os.path.splitext(out_mp4)[0] + ".png"
-    card_image(text, png, fmt, kicker)
+    card_image(text, png, fmt, kicker, brand)
     return kenburns(png, out_mp4, seconds, fmt, zoom=0.05)
 
 
-def face_center(src, start, seconds, samples=5):
-    """Median horizontal/vertical centre (0-1) of the largest face across a few frames, or None.
+def detect_faces(src, start, seconds, samples=6):
+    """Faces in a few sampled frames: [[(centre_x, centre_y, width) as 0-1 fractions, ...] per frame].
 
-    Runs on the CPU with OpenCV's bundled detector. With two people in frame it follows the larger face.
+    Runs on the CPU with OpenCV's bundled detector. Returns [] if OpenCV is unavailable.
     """
     try:
         import cv2
     except ImportError:
-        return None
+        return []
     cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
     cap = cv2.VideoCapture(src)
     if cascade.empty() or not cap.isOpened():
-        return None
-    xs, ys = [], []
+        return []
+    frames = []
     for i in range(samples):
         cap.set(cv2.CAP_PROP_POS_MSEC, (start + seconds * (i + 0.5) / samples) * 1000)
         ok, frame = cap.read()
@@ -1336,58 +1577,97 @@ def face_center(src, start, seconds, samples=5):
         h, w = frame.shape[:2]
         scale = 640.0 / w if w > 640 else 1.0
         gray = cv2.cvtColor(cv2.resize(frame, (int(w * scale), int(h * scale))), cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+        found = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
                                          minSize=(int(gray.shape[0] * 0.08),) * 2)
-        if len(faces):
-            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-            xs.append((x + fw / 2) / gray.shape[1])
-            ys.append((y + fh / 2) / gray.shape[0])
+        gh, gw = gray.shape[:2]
+        frames.append([((x + fw / 2) / gw, (y + fh / 2) / gh, fw / gw) for x, y, fw, fh in found])
     cap.release()
-    if len(xs) < 2:
-        return None
-    xs.sort(), ys.sort()
-    return xs[len(xs) // 2], ys[len(ys) // 2]
+    return frames
 
 
-def crop_offsets(src_w, src_h, W, H, center=None):
+def _median(values):
+    values = sorted(values)
+    return values[len(values) // 2]
+
+
+def plan_layout(frames, vertical=True):
+    """Decide how to frame footage from detected faces.
+
+    ("stack", left, right)  two hosts side by side -> one above the other (vertical video only)
+    ("single", centre)      one speaker -> crop around them
+    ("center",)             no faces found -> plain centre crop
+    """
+    with_faces = [f for f in frames if f]
+    pairs = []
+    for f in with_faces:
+        if len(f) < 2:
+            continue
+        a, b = sorted(f, key=lambda face: -face[2])[:2]
+        if abs(a[0] - b[0]) >= 0.25 and b[2] >= 0.5 * a[2]:
+            pairs.append(sorted((a, b)))
+    if vertical and len(pairs) >= 2 and len(pairs) >= 0.6 * len(with_faces):
+        left = (_median([p[0][0] for p in pairs]), _median([p[0][1] for p in pairs]))
+        right = (_median([p[1][0] for p in pairs]), _median([p[1][1] for p in pairs]))
+        return ("stack", left, right)
+    if len(with_faces) >= 2:
+        biggest = [max(f, key=lambda face: face[2]) for f in with_faces]
+        return ("single", (_median([b[0] for b in biggest]), _median([b[1] for b in biggest])))
+    return ("center",)
+
+
+def crop_offsets(src_w, src_h, W, H, center=None, zoom=1.0):
     """Scale-to-cover size and crop origin that keep `center` (0-1 fractions) in frame."""
-    f = max(W / src_w, H / src_h)
+    f = max(W / src_w, H / src_h) * zoom
     sw, sh = int(round(src_w * f / 2)) * 2, int(round(src_h * f / 2)) * 2
     cx, cy = center or (0.5, 0.5)
-    if not center:
-        cy = 0.5
-    else:
-        cy = min(0.5, cy + 0.1)  # keep faces in the upper part, with room for captions
+    if center:
+        cy = min(0.5, cy + 0.1) if zoom == 1.0 else cy + 0.04  # leave headroom, keep room for captions
     x = int(min(max(cx * sw - W / 2, 0), max(sw - W, 0)))
     y = int(min(max(cy * sh - H / 2, 0), max(sh - H, 0)))
     return sw, sh, x, y
 
 
-def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False):
-    """Cut `seconds` of real footage at `start`, cropped around the speaker's face. Muted unless `audio`."""
+def footage_filter(src_w, src_h, W, H, layout):
+    """ffmpeg filter graph ([0:v] -> [v]) for a layout from plan_layout."""
+    tail = "fps=30,format=yuv420p,setsar=1[v]"
+    if layout[0] == "stack":
+        half = H // 2
+        # zoom so each host's box shows roughly half the width of the original frame
+        zoom = max(1.0, (W / (0.55 * src_w)) / max(W / src_w, half / src_h))
+        parts = []
+        for name, face in (("top", layout[1]), ("bottom", layout[2])):
+            sw, sh, x, y = crop_offsets(src_w, src_h, W, half, face, zoom)
+            parts.append(f"[{name}0]scale={sw}:{sh},crop={W}:{half}:{x}:{y}[{name}]")
+        return "[0:v]split=2[top0][bottom0];" + ";".join(parts) + f";[top][bottom]vstack,{tail}"
+    sw, sh, x, y = crop_offsets(src_w, src_h, W, H, layout[1] if layout[0] == "single" else None)
+    return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
+
+
+def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=None):
+    """Cut `seconds` of real footage at `start`, framed around the speaker(s). Muted unless `audio`.
+
+    One face: crop around it. Two hosts in a vertical video: stacked, one above the other.
+    """
     from common import video_size
 
     W, H = FORMATS[fmt]
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
-    sw_, sh_ = video_size(src)
-    center = face_center(src, start, seconds) if sw_ else None
-    if center:
-        log(f"  face at {center[0]:.2f},{center[1]:.2f} - cropping around it")
-    if sw_:
-        sw, sh, x, y = crop_offsets(sw_, sh_, W, H, center)
-        vf = f"scale={sw}:{sh},crop={W}:{H}:{x}:{y},fps=30,format=yuv420p,setsar=1"
-    else:
-        vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,format=yuv420p,setsar=1"
-    sound = ["-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
-    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src, "-vf", vf, *sound,
+    src_w, src_h = video_size(src)
+    if not src_w:
+        raise RuntimeError(f"cannot read video size of {src}")
+    layout = layout or plan_layout(detect_faces(src, start, seconds), vertical=H > W)
+    log(f"  framing: {layout[0]}")
+    sound = ["-map", "0:a?", "-c:a", "aac", "-ar", "48000", "-ac", "2"] if audio else ["-an"]
+    run(FF + ["-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", src,
+              "-filter_complex", footage_filter(src_w, src_h, W, H, layout), "-map", "[v]", *sound,
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
     if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
                   "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", padded])
         os.replace(padded, out_mp4)
-    return out_mp4
+    return layout[0]
 
 
 class StillMaker:
@@ -1503,8 +1783,10 @@ def _ts(t):
     return f"{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}"
 
 
-def build_ass(words, width, height, path):
-    """Write an ASS file where each word turns gold as it is spoken. Returns seconds of caption coverage."""
+def build_ass(words, width, height, path, font="Arial", highlight=HIGHLIGHT, uppercase=False):
+    """Write an ASS file where each word changes colour as it is spoken. Returns seconds of caption coverage."""
+    if uppercase:
+        words = [(w.upper(), a, b) for w, a, b in words]
     vertical = height > width
     size = int(height * (0.047 if vertical else 0.065))
     margin_v = int(height * (0.16 if vertical else 0.08))
@@ -1514,7 +1796,7 @@ def build_ass(words, width, height, path):
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Cap,Arial,{size},{HIGHLIGHT},&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,"
+        f"Style: Cap,{font},{size},{highlight},&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,"
         f"{max(3, size // 11)},0,2,{int(width * 0.06)},{int(width * 0.06)},{margin_v},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     lines, covered = [], 0.0
@@ -1527,6 +1809,71 @@ def build_ass(words, width, height, path):
         covered += end - start
     write_text(path, head + "\n".join(lines) + "\n")
     return covered
+'@
+$files['brand.py'] = @'
+"""Brand kit: the show's colours, font and logo, set once in <workspace>/brand.json (or per project)."""
+import os
+
+from common import read_json
+
+DEFAULT = {
+    "accent": "#FFC400",            # bar and kicker on cards
+    "background": "#20223E",        # card background (drawn as a soft top-to-bottom gradient)
+    "text": "#FFFFFF",              # card text
+    "caption_highlight": "#FFD700",  # colour a caption word turns as it is spoken
+    "caption_uppercase": False,
+    "font": "Segoe UI",             # one of FONTS, or set "font_file" to any .ttf/.otf path
+    "font_file": "",
+    "logo": "",                     # PNG shown in a corner of the whole video
+    "logo_position": "top-right",   # top-right | top-left
+}
+# family name (used by captions) -> bold font file in C:\Windows\Fonts (used by cards)
+FONTS = {
+    "Segoe UI": "segoeuib.ttf", "Arial": "arialbd.ttf", "Impact": "impact.ttf", "Bahnschrift": "bahnschrift.ttf",
+    "Georgia": "georgiab.ttf", "Verdana": "verdanab.ttf", "Trebuchet MS": "trebucbd.ttf",
+}
+
+
+def load(project=None):
+    """Defaults, overridden by <workspace>/brand.json, then by <project>/brand.json."""
+    kit = dict(DEFAULT)
+    if project:
+        workspace = os.path.dirname(os.path.dirname(os.path.abspath(project)))
+        for path in (os.path.join(workspace, "brand.json"), os.path.join(project, "brand.json")):
+            data = read_json(path)
+            if isinstance(data, dict):
+                kit.update({k: v for k, v in data.items() if k in DEFAULT and v not in (None, "")})
+    return kit
+
+
+def rgb(hex_colour, fallback=(255, 255, 255)):
+    h = str(hex_colour).strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return fallback
+
+
+def ass_colour(hex_colour):
+    r, g, b = rgb(hex_colour)
+    return f"&H00{b:02X}{g:02X}{r:02X}"
+
+
+def font_files(kit):
+    """Candidate font files for cards, best first."""
+    out = []
+    if kit.get("font_file"):
+        out.append(kit["font_file"])
+    name = FONTS.get(kit.get("font", ""))
+    if name:
+        out.append(os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", name))
+    return out
+
+
+def caption_font(kit):
+    return kit.get("font") if kit.get("font") in FONTS else "Arial"
 '@
 $files['tts.py'] = @'
 """Voice-cloned narration with Qwen3-TTS 0.6B (fits a 4 GB GPU in fp16)."""
@@ -1686,7 +2033,15 @@ def library_dir(cfg, project):
 
 
 # ------------------------------------------------------------------ stage: outline
+OUTLINE_SCHEMA = {"type": "object", "required": ["title", "hooks", "beats", "cta"], "properties": {
+    "title": {"type": "string"},
+    "hooks": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+    "beats": {"type": "array", "items": {"type": "string"}},
+    "cta": {"type": "string"}}}
+
+
 def stage_outline(project, cfg, force):
+    """Draft outline.txt plus hooks.json (three opening lines to choose from)."""
     import llm
 
     out = os.path.join(project, "outline.txt")
@@ -1694,19 +2049,33 @@ def stage_outline(project, cfg, force):
         log("outline.txt exists - keeping it (use --force to redraft)")
         return
     bible = style_bible(project)
-    system = ("You plan short videos for a podcast. Be concrete and punchy. Plain text only, no markdown."
+    system = ("You plan short videos for a podcast. Be concrete and punchy. No markdown."
               + (f"\n\nSHOW STYLE GUIDE:\n{bible}" if bible else ""))
-    user = (f"Write an outline for a {cfg['seconds']}-second video about:\n{cfg['prompt']}\n\n"
-            "Use exactly this layout:\n"
-            "TITLE: <max 8 words>\n"
-            "HOOK: <the opening line, said in the first 3 seconds>\n"
-            "BEATS:\n1. <one line>\n2. <one line>\n(4 to 7 beats)\n"
-            "CTA: <closing line>")
-    t0 = time.time()
-    text = llm.chat(system, user, cfg["model"])
+    ask = f"Plan a {cfg['seconds']}-second video about:\n{cfg['prompt']}\n\n"
+    t0, hooks, text = time.time(), [], ""
+    try:
+        plan = llm.chat(system, ask + "Return JSON with: \"title\" (max 8 words), \"hooks\" (exactly 3 different "
+                        "opening lines, each said in the first 3 seconds: one a bold claim, one a question, one a "
+                        "short story opener), \"beats\" (4 to 7 one-line points), \"cta\" (closing line).",
+                        cfg["model"], schema=OUTLINE_SCHEMA)
+        hooks = [" ".join(str(h).split()) for h in plan.get("hooks") or [] if str(h).strip()][:3]
+        beats = [" ".join(str(b).split()) for b in plan.get("beats") or [] if str(b).strip()]
+        if hooks and len(beats) >= 3:
+            text = (f"TITLE: {plan.get('title', '').strip()}\nHOOK: {hooks[0]}\nBEATS:\n"
+                    + "\n".join(f"{n}. {b}" for n, b in enumerate(beats, 1)) + f"\nCTA: {plan.get('cta', '').strip()}")
+    except Exception as e:  # noqa: BLE001 - fall back to a plain-text outline
+        log(f"  structured outline failed ({e}); asking for plain text")
+    if not text:
+        hooks = []
+        text = llm.chat(system, ask + "Use exactly this layout, plain text only:\nTITLE: <max 8 words>\n"
+                        "HOOK: <the opening line, said in the first 3 seconds>\nBEATS:\n1. <one line>\n2. <one line>\n"
+                        "(4 to 7 beats)\nCTA: <closing line>", cfg["model"])
     write_text(out, text.strip() + "\n")
-    record_metric(project, "outline", seconds=round(time.time() - t0, 1), model=cfg["model"])
+    write_json(os.path.join(project, "hooks.json"), hooks)
+    record_metric(project, "outline", seconds=round(time.time() - t0, 1), model=cfg["model"], hooks=len(hooks))
     log(f"Outline saved: {out}\n\n{text}\n")
+    if len(hooks) > 1:
+        log("Other hooks to choose from:\n" + "\n".join(f"  - {h}" for h in hooks[1:]))
 
 
 # ------------------------------------------------------------------ stage: script
@@ -1859,6 +2228,38 @@ def stage_script(project, cfg, force):
 
 
 # ------------------------------------------------------------------ stage: voice
+def repair_voice(voice, lines, threshold=0.6, tries=2):
+    """Listen back to each new line (speech-to-text on the CPU) and re-make garbled ones, keeping the best take."""
+    from common import speech_match
+
+    retried, still_bad = [], []
+    try:
+        for i, s, wav in lines:
+            best = speech_match(wav, s["narration"], device="cpu")
+            for attempt in range(tries):
+                if best >= threshold:
+                    break
+                log(f"  line {i} sounds wrong ({best:.0%} of words heard) - re-making, try {attempt + 1}")
+                if i not in retried:
+                    retried.append(i)
+                backup = wav + ".prev"
+                os.replace(wav, backup)
+                voice.speak(s["narration"], wav, pause=0.15)
+                score = speech_match(wav, s["narration"], device="cpu")
+                if score > best:
+                    best = score
+                    os.remove(backup)
+                else:
+                    os.replace(backup, wav)
+            if best < threshold:
+                still_bad.append(i)
+    except Exception as e:  # noqa: BLE001 - the check is a bonus, never a blocker
+        log(f"  voice check skipped ({e})")
+    if retried:
+        log(f"Voice check: re-made lines {retried}; still unclear: {still_bad or 'none'}")
+    return retried, still_bad
+
+
 def stage_voice(project, cfg, force):
     script = read_json(os.path.join(project, "script.json"))
     if not script:
@@ -1886,18 +2287,22 @@ def stage_voice(project, cfg, force):
     for i, s, wav in todo:
         log(f"[voice {i}/{len(script['scenes'])}] {s['narration'][:70]}")
         voice.speak(s["narration"], wav, pause=0.15)
+    retried, still_bad = repair_voice(voice, todo) if cfg.get("voice_check", True) else ([], [])
     record_metric(project, "voice", seconds=round(time.time() - t0, 1), torch_peak_mb=voice.peak_mb(),
-                  gpu_used_before_mb=before, gpu_used_after_mb=gpu_used_mb(), dtype=str(voice.dtype))
+                  gpu_used_before_mb=before, gpu_used_after_mb=gpu_used_mb(), dtype=str(voice.dtype),
+                  lines_retried=retried, lines_still_unclear=still_bad)
     log(f"Voice done. Peak VRAM (torch): {voice.peak_mb()} MiB")
 
 
 # ------------------------------------------------------------------ stage: visuals
 def stage_visuals(project, cfg, force):
+    import brand
     import visuals
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json - run the script stage first.")
+    kit = brand.load(project)
     fmt = cfg["format"]
     vdir = ensure_dir(os.path.join(project, "visuals"))
     stills, t0 = None, time.time()
@@ -1921,7 +2326,8 @@ def stage_visuals(project, cfg, force):
                 if not src or not os.path.exists(src["file"]):
                     raise RuntimeError("source footage is missing")
                 log(f"  {os.path.basename(src['file'])} @ {src['start']}s")
-                visuals.footage_clip(src["file"], src["start"], out, secs, fmt, audio=kind == "soundbite")
+                s["framing"] = visuals.footage_clip(src["file"], src["start"], out, secs, fmt,
+                                                    audio=kind == "soundbite")
             elif kind == "still":
                 stills = stills or visuals.StillMaker()
                 png = os.path.splitext(out)[0] + ".png"
@@ -1936,7 +2342,7 @@ def stage_visuals(project, cfg, force):
                 log(f"  {kind} failed ({e}) - using a text card instead")
             kind = s["visual"] = "card"
             text = s["card_text"] or " ".join(s["narration"].split()[:10])
-            visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None)
+            visuals.card_clip(text, out, secs, fmt, kicker=script.get("title") if i == 1 else None, brand=kit)
         counts[kind] += 1
     write_json(os.path.join(project, "script.json"), script)
     record_metric(project, "visuals", seconds=round(time.time() - t0, 1), gpu_used_after_mb=gpu_used_mb(),
@@ -1946,11 +2352,13 @@ def stage_visuals(project, cfg, force):
 
 # ------------------------------------------------------------------ stage: render
 def stage_render(project, cfg, force):
+    import brand
     import subs
 
     script = read_json(os.path.join(project, "script.json"))
     if not script:
         fail("No script.json.")
+    kit = brand.load(project)
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
     enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
@@ -1961,13 +2369,18 @@ def stage_render(project, cfg, force):
         out = os.path.join(sdir, f"scene_{i:02}.mp4")
         if not os.path.exists(vis):
             fail(f"Missing {vis} - run the visuals stage first.")
-        if s["visual"] == "soundbite":
+        wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
+        inputs = [vis] if s["visual"] == "soundbite" else [vis, wav]
+        fresh = (not force and os.path.exists(out) and all(os.path.exists(p) for p in inputs)
+                 and os.path.getmtime(out) >= max(os.path.getmtime(p) for p in inputs))
+        if fresh:
+            pass
+        elif s["visual"] == "soundbite":
             secs = duration(vis)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
             run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
                       "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         else:
-            wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
             if not os.path.exists(wav):
                 fail(f"Missing {wav} - run the voice stage first.")
             secs = duration(wav)
@@ -1991,8 +2404,12 @@ def stage_render(project, cfg, force):
     covered = 0.0
     if cfg.get("captions", True):
         ass = os.path.join(project, "captions.ass")
-        covered = subs.build_ass(words, W, H, ass)
+        covered = subs.build_ass(words, W, H, ass, font=brand.caption_font(kit),
+                                 highlight=brand.ass_colour(kit["caption_highlight"]),
+                                 uppercase=bool(kit["caption_uppercase"]))
         cmd += ["--ass", ass]
+    if kit["logo"] and os.path.exists(kit["logo"]):
+        cmd += ["--logo", kit["logo"], "--logo-position", kit["logo_position"]]
     if cfg.get("music") and os.path.exists(cfg["music"]):
         cmd += ["--music", cfg["music"]]
     run(cmd)
@@ -2037,6 +2454,7 @@ def main():
     ap.add_argument("--captions", choices=["on", "off"])
     ap.add_argument("--soundbites", choices=["on", "off"])
     ap.add_argument("--qa-listen", choices=["on", "off"], dest="qa_listen")
+    ap.add_argument("--voice-check", choices=["on", "off"], dest="voice_check")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -2049,7 +2467,7 @@ def main():
     for key in ("prompt", "seconds", "format", "model", "voice", "voice_text", "language", "library", "music", "device"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key)
-    for key in ("stills", "captions", "soundbites", "qa_listen"):
+    for key in ("stills", "captions", "soundbites", "qa_listen", "voice_check"):
         if getattr(a, key) is not None:
             cfg[key] = getattr(a, key) == "on"
     if not cfg.get("prompt"):
@@ -2066,6 +2484,151 @@ def main():
         if subprocess.run(cmd).returncode != 0:
             fail(f"Stage '{stage}' failed. Fix the problem and run it again (step 2 in the Create tab) - finished work is kept.")
     log("\nAll stages complete.")
+
+
+if __name__ == "__main__":
+    main()
+'@
+$files['scenes.py'] = @'
+"""Scene editor backend: change, re-make, add or delete one scene without redoing the rest.
+
+  python scenes.py set    --project P --index 3 --fields-file edit.json
+  python scenes.py remake --project P --index 3        (new voice take / next best footage / new still)
+  python scenes.py add    --project P --index 3        (insert a card scene after scene 3)
+  python scenes.py delete --project P --index 3
+Then run pipeline.py --stage all: only the missing pieces are rebuilt.
+"""
+import argparse
+import os
+
+from common import fail, log, read_json, write_json, write_text
+
+KINDS = ("soundbite", "footage", "card", "still")
+PARTS = (("voice", ".wav"), ("visuals", ".mp4"), ("visuals", ".png"), ("scenes", ".mp4"))
+
+
+def _path(project, folder, n, ext):
+    return os.path.join(project, folder, f"scene_{n:02}{ext}")
+
+
+def invalidate(project, n, voice=True):
+    for folder, ext in PARTS:
+        if folder == "voice" and not voice:
+            continue
+        for p in (_path(project, folder, n, ext), _path(project, folder, n, ext) + ".txt"):
+            if os.path.exists(p):
+                os.remove(p)
+    final = os.path.join(project, "final.mp4")
+    if os.path.exists(final):
+        os.remove(final)
+
+
+def renumber(project, old, new):
+    for folder, ext in PARTS:
+        for tail in ("", ".txt"):
+            a, b = _path(project, folder, old, ext) + tail, _path(project, folder, new, ext) + tail
+            if os.path.exists(a):
+                os.replace(a, b)
+
+
+def find_source(project, cfg, scenes, i, skip_current=False):
+    """Pick episode footage for scene i that no other scene is using."""
+    import pipeline
+    from library import Library, pick_soundbite
+
+    s = scenes[i]
+    lib = Library(pipeline.library_dir(cfg, project))
+    if not len(lib):
+        fail("No footage library. Use 'Index footage' in the Create tab first.")
+    for j, other in enumerate(scenes):
+        if other.get("source") and (j != i or skip_current):
+            lib.mark_used(other["source"]["file"], other["source"]["start"])
+    hit = lib.search(s["query"])
+    if not hit:
+        fail("No other matching footage found for those search words.")
+    if s["visual"] == "soundbite":
+        start, secs, segs = pick_soundbite(hit, s["query"])
+        s["source"] = {"file": hit["file"], "start": start, "seconds": secs, "segs": segs}
+        s["narration"] = ""
+    else:
+        s["source"] = {"file": hit["file"], "start": hit["start"]}
+    log(f"Scene {i + 1} now uses {os.path.basename(hit['file'])} @ {s['source']['start']}s")
+
+
+def save(project, script):
+    write_json(os.path.join(project, "script.json"), script)
+    write_text(os.path.join(project, "script.txt"),
+               "\n\n".join(s["narration"] or f"[soundbite: {s['query']}]" for s in script["scenes"]) + "\n")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=["set", "remake", "add", "delete"])
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--index", type=int, required=True, help="Scene number, starting at 1")
+    ap.add_argument("--fields-file", help="JSON with narration, visual, query, card_text, image_prompt")
+    a = ap.parse_args()
+
+    project = os.path.abspath(a.project)
+    script = read_json(os.path.join(project, "script.json"))
+    cfg = read_json(os.path.join(project, "project.json"), {})
+    if not script:
+        fail("This project has no script yet. Make the video first (Create tab, step 2).")
+    scenes, n = script["scenes"], a.index
+    if not 1 <= n <= len(scenes):
+        fail(f"Scene {n} does not exist (there are {len(scenes)}).")
+    s = scenes[n - 1]
+
+    if a.action == "set":
+        new = read_json(a.fields_file) or {}
+        before = dict(s)
+        for key in ("narration", "query", "card_text", "image_prompt"):
+            if key in new:
+                s[key] = " ".join(str(new[key] or "").split())
+        visual = str(new.get("visual") or s["visual"]).lower()
+        if visual not in KINDS:
+            fail(f"Unknown scene type '{visual}'.")
+        s["visual"] = visual
+        if visual == "soundbite" and not s["query"]:
+            fail("A soundbite needs search words.")
+        if visual != "soundbite" and not s["narration"]:
+            fail("This scene type needs narration text.")
+        if visual in ("soundbite", "footage"):
+            if visual != before["visual"] or s["query"] != before["query"] or "source" not in s:
+                s["query"] = s["query"] or s["narration"][:200]
+                find_source(project, cfg, scenes, n - 1)
+            if visual == "soundbite":
+                s["narration"] = ""
+        else:
+            s.pop("source", None)
+        voice_changed = s["narration"] != before["narration"] or (visual == "soundbite") != (before["visual"] == "soundbite")
+        if s != before:
+            invalidate(project, n, voice=voice_changed)
+            log(f"Scene {n} updated" + (" (voice will be re-made)" if voice_changed else " (voice kept)"))
+        else:
+            log(f"Scene {n}: nothing changed")
+    elif a.action == "remake":
+        if s["visual"] in ("soundbite", "footage"):
+            find_source(project, cfg, scenes, n - 1, skip_current=True)
+        invalidate(project, n)
+        log(f"Scene {n} will be re-made")
+    elif a.action == "add":
+        for k in range(len(scenes), n, -1):
+            renumber(project, k, k + 1)
+        scenes.insert(n, {"narration": "New scene.", "visual": "card", "query": "", "card_text": "New scene",
+                          "image_prompt": ""})
+        invalidate(project, n + 1)
+        log(f"Added scene {n + 1}")
+    else:
+        if len(scenes) <= 2:
+            fail("A video needs at least two scenes.")
+        invalidate(project, n)
+        del scenes[n - 1]
+        for k in range(n + 1, len(scenes) + 2):
+            renumber(project, k, k - 1)
+        log(f"Deleted scene {n}")
+    script["edited"] = True
+    save(project, script)
 
 
 if __name__ == "__main__":
@@ -2099,10 +2662,12 @@ def main():
     ap.add_argument("--format", default="9:16", choices=list(FORMATS))
     ap.add_argument("--captions", action="store_true", help="Transcribe and burn in plain captions")
     ap.add_argument("--ass", help="Burn in this prepared ASS caption file instead of transcribing")
+    ap.add_argument("--logo", help="PNG shown in a corner of the whole video")
+    ap.add_argument("--logo-position", default="top-right", choices=["top-right", "top-left"])
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    for c in a.clips + [p for p in (a.voice, a.music, a.ass) if p]:
+    for c in a.clips + [p for p in (a.voice, a.music, a.ass, a.logo) if p]:
         if not os.path.exists(c):
             fail(f"Missing file: {c}")
     W, H = FORMATS[a.format]
@@ -2153,15 +2718,26 @@ def main():
         graph = []
         if a.music:
             cmd += ["-stream_loop", "-1", "-i", os.path.abspath(a.music)]
+            music = n
+            n += 1
             graph += [f"{speech}aresample=48000,asplit=2[sp][key]",
-                      f"[{n}:a]aresample=48000,volume={a.music_volume}[mu]",
+                      f"[{music}:a]aresample=48000,volume={a.music_volume}[mu]",
                       "[mu][key]sidechaincompress=threshold=0.03:ratio=10:attack=15:release=350[duck]",
                       f"[sp][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{LOUDNESS}[aout]"]
         else:
             graph.append(f"{speech}{LOUDNESS}[aout]")
+        picture = "[0:v]"
         if vfilter:
-            graph.append(f"[0:v]{vfilter}[vout]")
-            cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]",
+            graph.append(f"{picture}{vfilter}[capt]")
+            picture = "[capt]"
+        if a.logo:
+            cmd += ["-i", os.path.abspath(a.logo)]
+            pad = int(W * 0.04)
+            x = pad if a.logo_position == "top-left" else f"W-w-{pad}"
+            graph += [f"[{n}:v]scale={int(W * 0.16)}:-1[logo]", f"{picture}[logo]overlay={x}:{pad}[branded]"]
+            picture = "[branded]"
+        if picture != "[0:v]":
+            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
         else:
             cmd += ["-filter_complex", ";".join(graph), "-map", "0:v", "-map", "[aout]", "-c:v", "copy"]
@@ -2210,21 +2786,15 @@ def ffmpeg_report(path, *filters):
     return out.stderr
 
 
-def _words(text):
-    return re.findall(r"[a-z0-9']+", text.lower())
-
-
 def listen(project, script):
     """Transcribe each voice line and compare it with the script (catches garbled speech)."""
-    from common import transcribe
+    from common import speech_match
     bad, scores = [], []
     for i, s in enumerate(script["scenes"], 1):
         wav = os.path.join(project, "voice", f"scene_{i:02}.wav")
         if s["visual"] == "soundbite" or not os.path.exists(wav):
             continue
-        want = _words(s["narration"])
-        heard = set(_words(" ".join(t for _, _, t in transcribe(wav))))
-        score = sum(1 for w in want if w in heard) / (len(want) or 1)
+        score = speech_match(wav, s["narration"])
         scores.append(score)
         if score < 0.6:
             bad.append(f"scene {i} ({score:.0%})")
@@ -2232,7 +2802,7 @@ def listen(project, script):
         return add("voice matches script", "skip", "no voice lines")
     avg = sum(scores) / len(scores)
     add("voice matches script", "warn" if bad else "pass",
-        f"average {avg:.0%} of script words heard" + (f"; re-make: {', '.join(bad)}" if bad else ""))
+        f"average {avg:.0%} of script words heard" + (f"; re-make in the Scenes tab: {', '.join(bad)}" if bad else ""))
 
 
 def main():
@@ -2751,12 +3321,14 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
 - `style-bible.md` - the show's distilled style; the outline and script stages read it when present
+- `brand.json` - colours, font and logo for cards, captions and the corner logo (a project can hold its own copy)
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
 - One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
 - Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
 - Quality gate: `python ..\app\qa.py --project projects\x`
+- Edit one scene: `python ..\app\scenes.py set|remake|add|delete --project projects\x --index N [--fields-file edit.json]`, then `--stage all`
 - Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
 - One visual: `python ..\app\visuals.py card "Text" --out clips\c.mp4 --seconds 4`
@@ -2769,6 +3341,9 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `script.json` scenes: `narration`, `visual` (soundbite | footage | card | still), `query`, `card_text`, `image_prompt`, `source`.
 - A soundbite plays a real episode clip with its own sound (max 2 per video); other scenes use the cloned voice.
 - Captions are built from the script and measured timings, not from speech recognition.
+- The outline step writes `hooks.json` (three opening lines); the `HOOK:` line in `outline.txt` is the one used.
+- New voice lines are listened back to on the CPU and re-made up to twice if garbled (`--voice-check off` to skip).
+- Footage with two faces side by side is stacked (one host above the other) in vertical videos.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.
 '@
 foreach ($name in $files.Keys) {

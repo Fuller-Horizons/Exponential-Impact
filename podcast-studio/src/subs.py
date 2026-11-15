@@ -43,8 +43,10 @@ def _ts(t):
     return f"{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}"
 
 
-def build_ass(words, width, height, path):
-    """Write an ASS file where each word turns gold as it is spoken. Returns seconds of caption coverage."""
+def build_ass(words, width, height, path, font="Arial", highlight=HIGHLIGHT, uppercase=False):
+    """Write an ASS file where each word changes colour as it is spoken. Returns seconds of caption coverage."""
+    if uppercase:
+        words = [(w.upper(), a, b) for w, a, b in words]
     vertical = height > width
     size = int(height * (0.047 if vertical else 0.065))
     margin_v = int(height * (0.16 if vertical else 0.08))
@@ -54,7 +56,7 @@ def build_ass(words, width, height, path):
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Cap,Arial,{size},{HIGHLIGHT},&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,"
+        f"Style: Cap,{font},{size},{highlight},&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,"
         f"{max(3, size // 11)},0,2,{int(width * 0.06)},{int(width * 0.06)},{margin_v},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     lines, covered = [], 0.0

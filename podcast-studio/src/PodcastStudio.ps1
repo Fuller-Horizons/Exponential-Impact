@@ -207,7 +207,8 @@ function Get-ProjectArgs([string]$dir, [string]$stage) {
     [System.IO.File]::WriteAllText((Join-Path $dir 'prompt.txt'), $cPrompt.Text)
     $argv = @('--project', $dir, '--stage', $stage, '--prompt-file', (Join-Path $dir 'prompt.txt'),
         '--seconds', $cSecs.Text, '--format', $cFmt.Text, '--model', $cModel.Text, '--language', $vLang.Text,
-        '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }))
+        '--stills', $(if ($cStills.Checked) { 'on' } else { 'off' }),
+        '--soundbites', $(if ($cBites.Checked) { 'on' } else { 'off' }))
     if ($cVoice.Text) { $argv += @('--voice', $cVoice.Text) }
     return $argv
 }
@@ -220,6 +221,12 @@ $b.Add_Click({
     Run-Py 'Draft outline (local model)' 'pipeline.py' ((Get-ProjectArgs $dir 'outline') + '--force') {
         $f = Join-Path $script:ctx.dir 'outline.txt'
         if (Test-Path $f) { $cOutline.Text = ([System.IO.File]::ReadAllText($f) -replace "`r?`n", "`r`n") }
+        $cHook.Items.Clear()
+        $h = Join-Path $script:ctx.dir 'hooks.json'
+        if (Test-Path $h) {
+            foreach ($x in @([System.IO.File]::ReadAllText($h) | ConvertFrom-Json)) { if ($x) { [void]$cHook.Items.Add([string]$x) } }
+            if ($cHook.Items.Count -gt 0) { $cHook.SelectedIndex = 0 }
+        }
     }
 })
 $b = Add-Button $t0 '2. Approve + make video' 310 180 190
@@ -232,6 +239,7 @@ $b.Add_Click({
     Run-Py 'Make video (script, voice, visuals, render)' 'pipeline.py' (Get-ProjectArgs $dir 'all') {
         $f = Join-Path $script:ctx.dir 'final.mp4'
         if (Test-Path $f) { $script:lastFinal = $f; Start-Process explorer.exe "/select,`"$f`"" }
+        Load-Scenes $true
     }
 })
 $b = Add-Button $t0 'Open project' 510 180 120
@@ -244,10 +252,214 @@ $b = Add-Button $t0 'Full self-test' 750 180 160
 $b.Add_Click({
     Start-Job2 'Self-test (full: loads models, measures VRAM)' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $App 'Test-PodcastStudio.ps1'), '-Full', '-Model', $cModel.Text)
 })
-Add-Label $t0 'Outline (editable)' 10 220 | Out-Null
-$cOutline = Add-Text $t0 150 220 760 '' 185
+Add-Label $t0 'Hook (pick one)' 10 218 | Out-Null
+$cHook = New-Object System.Windows.Forms.ComboBox
+$cHook.DropDownStyle = 'DropDownList'
+$cHook.Location = New-Object System.Drawing.Point(150, 218); $cHook.Size = New-Object System.Drawing.Size(520, 24)
+$t0.Controls.Add($cHook)
+$cHook.Add_SelectedIndexChanged({
+    if ($cHook.SelectedIndex -lt 0) { return }
+    $lines = $cOutline.Text -split "`r?`n"
+    for ($k = 0; $k -lt $lines.Count; $k++) {
+        if ($lines[$k] -match '^\s*HOOK:') {
+            $lines[$k] = 'HOOK: ' + [string]$cHook.SelectedItem
+            $cOutline.Text = $lines -join "`r`n"
+            break
+        }
+    }
+})
+$cBites = New-Object System.Windows.Forms.CheckBox
+$cBites.Text = 'Soundbites'; $cBites.Checked = $true
+$cBites.Location = New-Object System.Drawing.Point(685, 218); $cBites.Size = New-Object System.Drawing.Size(105, 24)
+$t0.Controls.Add($cBites)
+$b = Add-Button $t0 'Brand kit...' 800 215 110
+$b.Add_Click({ Show-BrandKit })
+Add-Label $t0 'Outline (editable)' 10 252 | Out-Null
+$cOutline = Add-Text $t0 150 252 760 '' 153
 $n0 = Add-Label $t0 'Runs fully on this PC: a local model writes the outline and script, your cloned voice narrates, and scenes use real soundbites and footage from your indexed episodes, text cards and optional AI stills. Ends with a quality report (qa.json). A failed run resumes: press step 2 again.' 150 408 760
 $n0.Size = New-Object System.Drawing.Size(760, 34)
+
+# ---------------------------------------------------------------- brand kit dialog (workspace\brand.json)
+function Show-BrandKit {
+    $path = Join-Path $Work 'brand.json'
+    $kit = @{ accent = '#FFC400'; background = '#20223E'; text = '#FFFFFF'; caption_highlight = '#FFD700'
+              caption_uppercase = $false; font = 'Segoe UI'; logo = ''; logo_position = 'top-right' }
+    if (Test-Path $path) {
+        try {
+            $saved = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+            foreach ($k in @($kit.Keys)) { if ($null -ne $saved.$k -and "$($saved.$k)" -ne '') { $kit[$k] = $saved.$k } }
+        } catch { }
+    }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Brand kit'; $f.Size = New-Object System.Drawing.Size(520, 400); $f.StartPosition = 'CenterParent'
+    $f.Font = $form.Font; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $pick = {
+        $d = New-Object System.Windows.Forms.ColorDialog
+        $d.Color = $this.BackColor; $d.FullOpen = $true
+        if ($d.ShowDialog() -eq 'OK') { $this.BackColor = $d.Color }
+    }
+    $swatches = @{}
+    $y = 18
+    foreach ($row in @(@('accent', 'Accent colour (bar, title)'), @('background', 'Card background'), @('text', 'Card text'),
+                       @('caption_highlight', 'Caption highlight'))) {
+        Add-Label $f $row[1] 20 $y 200 | Out-Null
+        $sw = New-Object System.Windows.Forms.Button
+        $sw.Location = New-Object System.Drawing.Point(230, $y); $sw.Size = New-Object System.Drawing.Size(120, 26)
+        $sw.FlatStyle = 'Flat'
+        try { $sw.BackColor = [System.Drawing.ColorTranslator]::FromHtml([string]$kit[$row[0]]) } catch { $sw.BackColor = [System.Drawing.Color]::White }
+        $sw.Add_Click($pick)
+        $f.Controls.Add($sw); $swatches[$row[0]] = $sw
+        $y += 36
+    }
+    Add-Label $f 'Font' 20 $y 200 | Out-Null
+    $font = Add-Combo $f 230 $y 200 @('Segoe UI', 'Arial', 'Impact', 'Bahnschrift', 'Georgia', 'Verdana', 'Trebuchet MS')
+    if ($font.Items.Contains([string]$kit.font)) { $font.SelectedItem = [string]$kit.font }
+    $y += 36
+    $upper = New-Object System.Windows.Forms.CheckBox
+    $upper.Text = 'Captions in CAPITALS'; $upper.Checked = [bool]$kit.caption_uppercase
+    $upper.Location = New-Object System.Drawing.Point(230, $y); $upper.Size = New-Object System.Drawing.Size(220, 24)
+    $f.Controls.Add($upper)
+    $y += 36
+    Add-Label $f 'Logo (PNG, optional)' 20 $y 200 | Out-Null
+    $logo = Add-Text $f 230 $y 170 ([string]$kit.logo)
+    $lb = Add-Button $f '...' 405 ($y - 2) 35
+    $lb.Tag = $logo
+    $lb.Add_Click({ $p = Pick-File 'Image|*.png;*.jpg;*.jpeg|All files|*.*' $Work; if ($p) { $this.Tag.Text = $p } })
+    $lc = Add-Button $f 'Clear' 445 ($y - 2) 50
+    $lc.Tag = $logo
+    $lc.Add_Click({ $this.Tag.Text = '' })
+    $y += 36
+    Add-Label $f 'Logo corner' 20 $y 200 | Out-Null
+    $pos = Add-Combo $f 230 $y 120 @('top-right', 'top-left')
+    if ($pos.Items.Contains([string]$kit.logo_position)) { $pos.SelectedItem = [string]$kit.logo_position }
+    $ok = Add-Button $f 'Save' 300 310 90; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok
+    $cancel = Add-Button $f 'Cancel' 400 310 90; $cancel.DialogResult = 'Cancel'; $f.CancelButton = $cancel
+    if ($f.ShowDialog($form) -ne 'OK') { return }
+    $out = [ordered]@{}
+    foreach ($k in 'accent', 'background', 'text', 'caption_highlight') {
+        $c = $swatches[$k].BackColor
+        $out[$k] = '#{0:X2}{1:X2}{2:X2}' -f $c.R, $c.G, $c.B
+    }
+    $out['font'] = [string]$font.SelectedItem
+    $out['caption_uppercase'] = [bool]$upper.Checked
+    $out['logo'] = $logo.Text
+    $out['logo_position'] = [string]$pos.SelectedItem
+    [System.IO.File]::WriteAllText($path, ($out | ConvertTo-Json))
+    Log "Brand kit saved: $path (used by the next video you make)"
+}
+
+# ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
+$tS = New-Tab 'Scenes (edit)'
+$script:sceneData = @()
+$b = Add-Button $tS 'Load scenes' 10 10 120
+$b.Add_Click({ Load-Scenes $false })
+$sInfo = Add-Label $tS 'Shows the project named in the Create tab.' 140 10 760
+$eList = New-Object System.Windows.Forms.ListBox
+$eList.Location = New-Object System.Drawing.Point(10, 45); $eList.Size = New-Object System.Drawing.Size(340, 340)
+$eList.HorizontalScrollbar = $true; $eList.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tS.Controls.Add($eList)
+Add-Label $tS 'Type' 365 45 90 | Out-Null
+$eType = Add-Combo $tS 460 45 150 @('card', 'footage', 'soundbite', 'still')
+Add-Label $tS 'Narration' 365 80 90 | Out-Null
+$eNarr = Add-Text $tS 460 80 450 '' 95
+Add-Label $tS 'Search words' 365 183 90 | Out-Null
+$eQuery = Add-Text $tS 460 183 450
+Add-Label $tS 'Card text' 365 218 90 | Out-Null
+$eCard = Add-Text $tS 460 218 450
+Add-Label $tS 'Image prompt' 365 253 90 | Out-Null
+$eImg = Add-Text $tS 460 253 450
+
+function Load-Scenes([bool]$quiet) {
+    $dir = Get-Project; if (-not $dir) { return }
+    $keep = $eList.SelectedIndex
+    $eList.Items.Clear(); $script:sceneData = @()
+    $file = Join-Path $dir 'script.json'
+    if (-not (Test-Path $file)) {
+        if (-not $quiet) { Msg 'This project has no script yet. Make the video first (Create tab, step 2).' }
+        return
+    }
+    try { $doc = [System.IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { Msg "Could not read $file"; return }
+    $script:sceneData = @($doc.scenes)
+    $n = 0
+    foreach ($sc in $script:sceneData) {
+        $n++
+        $t = if ($sc.narration) { [string]$sc.narration } else { "[soundbite] $($sc.query)" }
+        [void]$eList.Items.Add(('{0:00} {1,-9} {2}' -f $n, $sc.visual, $t))
+    }
+    $sInfo.Text = "Project: $(Split-Path $dir -Leaf)   |   $n scenes   |   $($doc.title)"
+    if ($keep -ge 0 -and $keep -lt $eList.Items.Count) { $eList.SelectedIndex = $keep }
+}
+function Get-SceneNumber {
+    if ($eList.SelectedIndex -lt 0) { Msg 'Load the scenes and pick one first.'; return 0 }
+    return $eList.SelectedIndex + 1
+}
+$eList.Add_SelectedIndexChanged({
+    $i = $eList.SelectedIndex
+    if ($i -lt 0 -or $i -ge $script:sceneData.Count) { return }
+    $sc = $script:sceneData[$i]
+    if ($eType.Items.Contains([string]$sc.visual)) { $eType.SelectedItem = [string]$sc.visual }
+    $eNarr.Text = [string]$sc.narration; $eQuery.Text = [string]$sc.query
+    $eCard.Text = [string]$sc.card_text; $eImg.Text = [string]$sc.image_prompt
+})
+
+$b = Add-Button $tS 'Save scene' 460 295 105
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    $fields = [ordered]@{ narration = $eNarr.Text; visual = [string]$eType.SelectedItem; query = $eQuery.Text
+                          card_text = $eCard.Text; image_prompt = $eImg.Text }
+    $edit = Join-Path $dir 'edit.json'
+    [System.IO.File]::WriteAllText($edit, ($fields | ConvertTo-Json))
+    Run-Py "Save scene $n" 'scenes.py' @('set', '--project', $dir, '--index', "$n", '--fields-file', $edit) { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Re-make this scene' 573 295 150
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    $script:ctx = @{ dir = $dir }
+    Run-Py "Re-make scene $n" 'scenes.py' @('remake', '--project', $dir, '--index', "$n") {
+        Run-Py 'Re-make video (only what changed)' 'pipeline.py' @('--project', $script:ctx.dir, '--stage', 'all') { Load-Scenes $true }
+    }
+})
+$b = Add-Button $tS 'Add after' 731 295 85
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    Run-Py "Add scene after $n" 'scenes.py' @('add', '--project', $dir, '--index', "$n") { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Delete' 824 295 86
+$b.Add_Click({
+    $n = Get-SceneNumber; if ($n -eq 0) { return }
+    $dir = Get-Project; if (-not $dir) { return }
+    if ([System.Windows.Forms.MessageBox]::Show("Delete scene $n?", 'Podcast Studio', 'YesNo') -ne 'Yes') { return }
+    Run-Py "Delete scene $n" 'scenes.py' @('delete', '--project', $dir, '--index', "$n") { Load-Scenes $true }
+})
+$b = Add-Button $tS 'Apply changes + re-make video' 460 335 263
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $script:ctx = @{ dir = $dir }
+    Run-Py 'Re-make video (only what changed)' 'pipeline.py' @('--project', $dir, '--stage', 'all') {
+        $v = Join-Path $script:ctx.dir 'final.mp4'
+        if (Test-Path $v) { $script:lastFinal = $v }
+        Load-Scenes $true
+    }
+})
+$b = Add-Button $tS 'Play video' 731 335 85
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $v = Join-Path $dir 'final.mp4'
+    if (Test-Path $v) { Start-Process $v } else { Msg 'No finished video yet - press "Apply changes + re-make video".' }
+})
+$b = Add-Button $tS 'Quality report' 824 335 86
+$b.Add_Click({
+    $dir = Get-Project; if (-not $dir) { return }
+    $q = Join-Path $dir 'qa.json'
+    if (Test-Path $q) { Start-Process notepad.exe $q } else { Msg 'No quality report yet.' }
+})
+$nS = Add-Label $tS ('Save scene stores your edit; nothing is rebuilt until you press "Apply changes". Only edited scenes are re-made: changing ' +
+    'card text keeps the voice line, changing narration re-records it. "Re-make this scene" gives a new voice take and, for footage or ' +
+    'soundbites, the next best matching moment.') 365 378 545
+$nS.Size = New-Object System.Drawing.Size(545, 62)
 
 # ================================================================ TAB 1: Analyze
 $t1 = New-Tab '1 - Analyze'

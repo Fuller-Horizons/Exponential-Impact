@@ -9,12 +9,14 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `voice/` - reference voice samples (`*.wav` + matching `*.txt` transcript)
 - `analysis/` - frames + transcripts from the watch skill and faster-whisper
 - `style-bible.md` - the show's distilled style; the outline and script stages read it when present
+- `brand.json` - colours, font and logo for cards, captions and the corner logo (a project can hold its own copy)
 
 ## Tools (Python = `..\venv\Scripts\python.exe`, scripts in `..\app\`)
 - Whole pipeline: `python ..\app\pipeline.py --project projects\x --stage outline --prompt "..."`, edit `outline.txt`, then `--stage all`
 - One stage: `--stage script|voice|visuals|render|qa` (add `--force` to redo it)
 - Style bible: `python ..\app\stylebible.py --lib library --out style-bible.md`
 - Quality gate: `python ..\app\qa.py --project projects\x`
+- Edit one scene: `python ..\app\scenes.py set|remake|add|delete --project projects\x --index N [--fields-file edit.json]`, then `--stage all`
 - Index footage: `python ..\app\library.py index <folder> --lib library`
 - Voice sample: `python ..\app\extract_voice.py <url|file> --start MM:SS --duration 12 --outdir voice --name host`
 - One visual: `python ..\app\visuals.py card "Text" --out clips\c.mp4 --seconds 4`
@@ -27,4 +29,7 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - `script.json` scenes: `narration`, `visual` (soundbite | footage | card | still), `query`, `card_text`, `image_prompt`, `source`.
 - A soundbite plays a real episode clip with its own sound (max 2 per video); other scenes use the cloned voice.
 - Captions are built from the script and measured timings, not from speech recognition.
+- The outline step writes `hooks.json` (three opening lines); the `HOOK:` line in `outline.txt` is the one used.
+- New voice lines are listened back to on the CPU and re-made up to twice if garbled (`--voice-check off` to skip).
+- Footage with two faces side by side is stacked (one host above the other) in vertical videos.
 - Models run one at a time (each stage is its own process) so 4 GB of VRAM is enough.

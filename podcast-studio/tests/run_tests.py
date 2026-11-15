@@ -112,6 +112,53 @@ def text_helpers():
     assert chunks[0] == "One. Two." and chunks[-1] == "New para." and len(chunks) >= 3
 
 
+@test
+def layout_planning():
+    import visuals
+    two = [(0.27, 0.40, 0.12), (0.72, 0.42, 0.11)]
+    assert visuals.plan_layout([two, two, two[::-1], [two[0]]])[0] == "stack"
+    kind, left, right = visuals.plan_layout([two, two, two])
+    assert left[0] < right[0] and abs(left[0] - 0.27) < 1e-6
+    assert visuals.plan_layout([two, two, two], vertical=False)[0] == "single"
+    assert visuals.plan_layout([[(0.3, 0.4, 0.2), (0.35, 0.4, 0.19)]] * 3)[0] == "single"   # too close together
+    assert visuals.plan_layout([[(0.3, 0.4, 0.2), (0.8, 0.4, 0.05)]] * 3)[0] == "single"    # second face tiny
+    assert visuals.plan_layout([[(0.6, 0.3, 0.2)], [], [(0.62, 0.3, 0.2)]]) == ("single", (0.62, 0.3))
+    assert visuals.plan_layout([[], [], [(0.5, 0.5, 0.2)]]) == ("center",) and visuals.plan_layout([]) == ("center",)
+    graph = visuals.footage_filter(1920, 1080, 1080, 1920, ("stack", (0.27, 0.4), (0.72, 0.42)))
+    assert "vstack" in graph and graph.count("crop=1080:960") == 2
+
+
+@test
+def brand_kit():
+    import brand
+    import subs
+    import visuals
+    ws = tempfile.mkdtemp()
+    project = os.path.join(ws, "projects", "p")
+    os.makedirs(project)
+    json.dump({"accent": "#FF0000", "font": "Impact", "caption_highlight": "#00FF00", "junk": 1},
+              open(os.path.join(ws, "brand.json"), "w"))
+    json.dump({"accent": "#0000FF", "background": ""}, open(os.path.join(project, "brand.json"), "w"))
+    kit = brand.load(project)
+    assert kit["accent"] == "#0000FF" and kit["font"] == "Impact" and "junk" not in kit
+    assert kit["background"] == brand.DEFAULT["background"], "empty values must not override"
+    assert brand.rgb("#0F0") == (0, 255, 0) and brand.rgb("nope") == (255, 255, 255)
+    assert brand.ass_colour("#FFD700") == "&H0000D7FF" and brand.caption_font(kit) == "Impact"
+    from PIL import Image
+    png = os.path.join(ws, "card.png")
+    visuals.card_image("Brand test", png, "9:16", brand=dict(kit, background="#004000"))
+    img = Image.open(png)
+    colours = {c for _, c in img.getcolors(maxcolors=1 << 20)}
+    assert (0, 0, 255) in colours, "accent bar should use the brand accent"
+    r, g, b = img.getpixel((10, 1900))
+    assert g > 50 and r < 10 and b < 10, "background should use the brand colour"
+    path = os.path.join(ws, "c.ass")
+    subs.build_ass(subs.word_times("hello world", 0, 2), 1080, 1920, path, font="Impact", highlight="&H0000FF00",
+                   uppercase=True)
+    text = open(path, encoding="utf-8").read()
+    assert "Style: Cap,Impact," in text and "&H0000FF00" in text and "HELLO" in text
+
+
 # ------------------------------------------------------------------ end to end
 WORK = tempfile.mkdtemp(prefix="pstudio_tests_")
 ENV = None
@@ -128,11 +175,11 @@ def pipeline_run(*args, ok=0):
 def e2e_index_and_style_bible():
     eps = os.path.join(WORK, "eps")
     os.makedirs(eps)
-    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=60", "-f", "lavfi",
-       "-i", "sine=f=300:d=60", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", os.path.join(eps, "ep1.mp4"))
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=120", "-f", "lavfi",
+       "-i", "sine=f=300:d=120", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", os.path.join(eps, "ep1.mp4"))
     sh(PY, os.path.join(SRC, "library.py"), "index", eps, "--lib", LIB, env=ENV)
     index = json.load(open(os.path.join(LIB, "index.json"), encoding="utf-8"))
-    assert len(index["chunks"]) == 3 and all("vec" in c and c["segs"] for c in index["chunks"])
+    assert len(index["chunks"]) == 6 and all("vec" in c and c["segs"] for c in index["chunks"])
     again = sh(PY, os.path.join(SRC, "library.py"), "index", eps, "--lib", LIB, env=ENV)
     assert "already indexed" in again
     bible = os.path.join(WORK, "ws", "style-bible.md")
@@ -142,14 +189,35 @@ def e2e_index_and_style_bible():
 
 
 @test
+def stacked_two_host_footage():
+    import visuals
+    out = os.path.join(WORK, "stack.mp4")
+    kind = visuals.footage_clip(os.path.join(WORK, "eps", "ep1.mp4"), 3, out, 2.0, "9:16", audio=True,
+                                layout=("stack", (0.27, 0.4), (0.72, 0.42)))
+    info = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "csv=p=0", out)
+    assert kind == "stack" and "video,1080,1920" in info and "audio" in info, info
+    assert visuals.footage_clip(os.path.join(WORK, "eps", "ep1.mp4"), 3, out, 1.0, "9:16") == "center"
+
+
+@test
 def e2e_prompt_to_video():
     import fake_ollama
     voice = os.path.join(WORK, "ref.wav")
     sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=200:d=5", voice)
+    logo = os.path.join(WORK, "logo.png")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=200x100", "-frames:v", "1", logo)
+    json.dump({"accent": "#00C2FF", "logo": logo}, open(os.path.join(WORK, "ws", "brand.json"), "w"))
     out = pipeline_run("--stage", "outline", "--prompt", "cash flow tips", "--seconds", "32", "--voice", voice,
                        "--library", LIB)
-    assert "TITLE: Cash Flow Wins" in open(os.path.join(PROJECT, "outline.txt"), encoding="utf-8").read()
-    out = pipeline_run("--stage", "all")
+    outline = open(os.path.join(PROJECT, "outline.txt"), encoding="utf-8").read()
+    hooks = json.load(open(os.path.join(PROJECT, "hooks.json"), encoding="utf-8"))
+    assert "TITLE: Cash Flow Wins" in outline and len(hooks) == 3 and f"HOOK: {hooks[0]}" in outline
+    ENV["PSTUDIO_TEST_GARBLE"] = "1"   # the fake voice garbles the first take of every line
+    try:
+        out = pipeline_run("--stage", "all")
+    finally:
+        del ENV["PSTUDIO_TEST_GARBLE"]
+    assert "--logo" in out, "the brand logo should be passed to the final render"
     assert "asking for a rewrite" in out, "the too-short first draft should trigger a rewrite"
     assert fake_ollama.state["schema_seen"], "script request should send a JSON schema"
     script = json.load(open(os.path.join(PROJECT, "script.json"), encoding="utf-8"))
@@ -162,6 +230,7 @@ def e2e_prompt_to_video():
     assert size == "1080,1920", size
     metrics = json.load(open(os.path.join(PROJECT, "metrics.json"), encoding="utf-8"))
     assert metrics["render"]["duration_ok"] and 20 < metrics["render"]["final_seconds"] < 45, metrics["render"]
+    assert metrics["voice"]["lines_retried"] and not metrics["voice"]["lines_still_unclear"], metrics["voice"]
     assert metrics["render"]["caption_seconds"] > 0.8 * metrics["render"]["final_seconds"] * 0.9
     assert "\\k" in open(os.path.join(PROJECT, "captions.ass"), encoding="utf-8").read()
     qa = json.load(open(os.path.join(PROJECT, "qa.json"), encoding="utf-8"))
@@ -169,6 +238,54 @@ def e2e_prompt_to_video():
     assert qa["verdict"] != "FAIL", qa
     for name in ("length matches scenes", "resolution", "loudness", "caption coverage", "voice matches script"):
         assert status.get(name) == "pass", (name, qa["checks"])
+
+
+def scenes_run(action, index, fields=None, ok=0):
+    cmd = [PY, os.path.join(SRC, "scenes.py"), action, "--project", PROJECT, "--index", index]
+    if fields is not None:
+        path = os.path.join(WORK, "edit.json")
+        json.dump(fields, open(path, "w"))
+        cmd += ["--fields-file", path]
+    return sh(*cmd, env=ENV, ok=ok)
+
+
+@test
+def e2e_scene_editor():
+    load = lambda: json.load(open(os.path.join(PROJECT, "script.json"), encoding="utf-8"))["scenes"]  # noqa: E731
+    part = lambda folder, n, ext: os.path.join(PROJECT, folder, f"scene_{n:02}{ext}")  # noqa: E731
+    scenes = load()
+    count = len(scenes)
+    card = next(i for i, s in enumerate(scenes, 1) if s["visual"] == "card")
+    foot = next(i for i, s in enumerate(scenes, 1) if s["visual"] == "footage")
+    voice_time = os.path.getmtime(part("voice", card, ".wav"))
+    # 1. card text only: the voice line is kept, the picture is dropped
+    scenes_run("set", card, {"card_text": "Edited card"})
+    assert os.path.getmtime(part("voice", card, ".wav")) == voice_time
+    assert not os.path.exists(part("visuals", card, ".mp4")) and not os.path.exists(os.path.join(PROJECT, "final.mp4"))
+    # 2. narration change drops the voice line too
+    scenes_run("set", card, {"narration": "A brand new opening line about cash."})
+    assert not os.path.exists(part("voice", card, ".wav"))
+    # 3. re-make a footage scene: it must move to a different moment
+    before = scenes[foot - 1]["source"]["start"]
+    scenes_run("remake", foot)
+    assert load()[foot - 1]["source"]["start"] != before
+    # 4. validation
+    assert "needs narration" in scenes_run("set", card, {"narration": ""}, ok=1)
+    assert "does not exist" in scenes_run("remake", 99, ok=1)
+    # 5. add then delete: files are renumbered, not re-made
+    last_voice = os.path.getmtime(part("voice", count, ".wav"))
+    scenes_run("add", 1)
+    assert len(load()) == count + 1 and load()[1]["card_text"] == "New scene"
+    assert os.path.getmtime(part("voice", count + 1, ".wav")) == last_voice and not os.path.exists(part("voice", 2, ".wav"))
+    scenes_run("delete", 2)
+    assert len(load()) == count and os.path.getmtime(part("voice", count, ".wav")) == last_voice
+    # 6. rebuild: only the missing pieces are made again
+    out = pipeline_run("--stage", "all")
+    spoken = out.count("[voice ")
+    assert spoken == 2, f"only the edited line and the re-made scene should be spoken again, got {spoken}"
+    assert load()[card - 1]["card_text"] == "Edited card" and os.path.exists(os.path.join(PROJECT, "final.mp4"))
+    qa = json.load(open(os.path.join(PROJECT, "qa.json"), encoding="utf-8"))
+    assert qa["verdict"] != "FAIL", qa
 
 
 @test

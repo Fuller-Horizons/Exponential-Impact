@@ -13,7 +13,8 @@ if "--no-test" not in sys.argv:  # never ship an installer whose tests fail
         raise SystemExit("Tests failed - installer not built. (--no-test to override)")
 
 order = ["PodcastStudio.ps1", "Test-PodcastStudio.ps1", "common.py", "llm.py", "library.py", "visuals.py",
-         "subs.py", "tts.py", "pipeline.py", "assemble.py", "qa.py", "stylebible.py", "captions.py",
+         "subs.py", "brand.py", "tts.py", "pipeline.py", "scenes.py", "assemble.py", "qa.py", "stylebible.py",
+         "captions.py",
          "extract_voice.py", "fal_generate.py", "selftest.py", "CLAUDE.md"]
 missing = {p.name for p in (here / "src").iterdir() if p.is_file()} - set(order)
 assert not missing, f"not embedded: {missing}"
