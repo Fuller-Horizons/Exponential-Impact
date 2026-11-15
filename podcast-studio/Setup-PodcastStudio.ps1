@@ -228,6 +228,14 @@ if (-not $SkipModels) {
         } -Soft | Out-Null
     }
 
+    # Smaller conversation memory on the graphics card: flash attention, and an 8-bit KV cache (about half the
+    # memory of the default). Ollama reads these when it starts, so they apply after its next restart.
+    foreach ($kv in @(@('OLLAMA_FLASH_ATTENTION', '1'), @('OLLAMA_KV_CACHE_TYPE', 'q8_0'), @('OLLAMA_MAX_LOADED_MODELS', '1'))) {
+        if (-not [Environment]::GetEnvironmentVariable($kv[0], 'User')) {
+            [Environment]::SetEnvironmentVariable($kv[0], $kv[1], 'User')
+            Set-Item -Path "Env:$($kv[0])" -Value $kv[1]
+        }
+    }
     Step "Local language model (Ollama: $Model + nomic-embed-text)"
     if (Has 'ollama') {
         $up = $false
@@ -753,7 +761,11 @@ $b.Add_Click({ $f = Pick-File $VideoFilter; if ($f) { $rFile.Text = $f; $rSlug.T
 Add-Label $tR 'Project name' 10 47 | Out-Null
 $rSlug = Add-Text $tR 150 47 250
 Add-Label $tR 'Type' 415 47 40 | Out-Null
-$rKind = Add-Combo $tR 460 47 210 @('Short (reel or Short)', 'Long video')
+$rKind = Add-Combo $tR 460 47 190 @('Short (reel or Short)', 'Long video')
+$rTight = New-Object System.Windows.Forms.CheckBox
+$rTight.Text = 'Remove pauses here first'; $rTight.Checked = $true
+$rTight.Location = New-Object System.Drawing.Point(662, 47); $rTight.Size = New-Object System.Drawing.Size(250, 24)
+$tR.Controls.Add($rTight)
 $rPrompt = Add-Text $tR 150 165 760 '' 175
 $lr = Add-Label $tR 'What Claude Code will be asked (you can edit it)' 10 165 135
 $lr.Size = New-Object System.Drawing.Size(135, 80)
@@ -775,7 +787,9 @@ $b = Add-Button $tR '1. Prepare (transcribe here)' 150 85 220
 $b.Add_Click({
     if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
     if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
-    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work) { Load-RecordingPrompt }
+    $argv = @('prepare', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work)
+    if ($rTight.Checked) { $argv += '--tighten' }
+    Run-Py 'Prepare recording (copy, transcribe on this PC)' 'recording.py' $argv { Load-RecordingPrompt }
 })
 $b = Add-Button $tR '2. Edit with Claude Code' 380 85 200
 $b.Add_Click({
@@ -802,9 +816,30 @@ $b.Add_Click({
         if (Test-Path $script:ctx.out) { Start-Process explorer.exe "/select,`"$($script:ctx.out)`"" }
     }
 })
-Add-Label $tR 'Removes pauses only and saves a copy next to the recording.' 380 125 530 | Out-Null
-$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit (cuts, story, captions, motion graphics). ' +
-    'The transcript and editing decisions go to Claude; the video files stay here. Uses your Claude subscription.') 150 348 760
+$b = Add-Button $tR 'Split long recording' 380 125 160
+$b.Add_Click({
+    if (-not (Test-Path $rFile.Text)) { Msg 'Choose your raw recording first.'; return }
+    if ($rSlug.Text -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { Msg 'The project name must be lowercase letters, digits and dashes, like my-first-take.'; return }
+    $argv = @('split', '--recording', $rFile.Text, '--slug', $rSlug.Text, '--workspace', $Work, '--minutes', $rMinutes.Text)
+    if ($rTight.Checked) { $argv += '--tighten' }
+    Run-Py 'Split into parts (each part is its own project)' 'recording.py' $argv {
+        Log 'Edit each part: set Project name to <name>-part-01, -02 ... and press "2. Edit with Claude Code" for each. Then press "Join edited parts".'
+    }
+})
+Add-Label $tR 'parts of' 545 125 55 | Out-Null
+$rMinutes = Add-Text $tR 602 125 35 '8'
+Add-Label $tR 'min' 640 125 30 | Out-Null
+$b = Add-Button $tR 'Join edited parts' 760 125 150
+$b.Add_Click({
+    $base = ($rSlug.Text.Trim() -replace '-part-\d+$', '')
+    if (-not $base) { Msg 'Type the project name the recording was split under.'; return }
+    Run-Py 'Join the edited parts' 'recording.py' @('join', '--slug', $base) {
+        $j = Join-Path $Kit ("video-projects\" + ($rSlug.Text.Trim() -replace '-part-\d+$', '') + '-joined.mp4')
+        if (Test-Path $j) { Start-Process explorer.exe "/select,`"$j`"" }
+    }
+})
+$nR = Add-Label $tR ('Hybrid: this PC copies and transcribes the recording; Claude Code then edits it with the Herk Edit Kit. The transcript and editing decisions go to Claude; ' +
+    'the video files stay here. For recordings over about 15 minutes, split them first: each part edits and renders in far less memory.') 150 348 760
 $nR.Size = New-Object System.Drawing.Size(760, 60)
 
 # ================================================================ TAB: Scenes (edit one scene, re-make only what changed)
@@ -1530,6 +1565,8 @@ Check 'recording tab and house rules' {
     Expect ((Get-RecordingKind) -eq 'long') 'type box does not map to the long edit'
     $rKind.SelectedIndex = 0
     Expect ((Get-RecordingKind) -eq 'short') 'type box does not map to the short edit'
+    Expect ($rTight.Checked -and $rMinutes.Text -eq '8') 'pause removal should be on and parts 8 minutes by default'
+    Expect (('my-talk-part-03' -replace '-part-\d+$', '') -eq 'my-talk') 'part names do not map back to the base name'
     $rSlug.Text = ''
     $rules = Join-Path $smokeDir 'rules.md'
     Expect (Add-HouseRule "  Never   open with a greeting. " $rules) 'rule was not saved'
@@ -1618,6 +1655,7 @@ $files['common.py'] = @'
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -1730,6 +1768,124 @@ def studio_root():
     return os.environ.get("PSTUDIO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def settings():
+    """workspace/settings.json: user choices such as {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true}."""
+    data = read_json(os.path.join(studio_root(), "workspace", "settings.json"), {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+# ------------------------------------------------------------------ video encoding
+# Every clip this app writes is tagged, so later steps know they can join clips without re-encoding them.
+ENC_VERSION = "1"
+X264 = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+NVENC_TRIES = (["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", "0", "-pix_fmt", "yuv420p"],
+               ["-c:v", "h264_nvenc", "-preset", "fast", "-rc", "vbr", "-b:v", "0", "-pix_fmt", "yuv420p"])
+_encoder = {}
+
+
+def _nvenc_args():
+    """NVENC settings that work on this PC, or None. Tested once and remembered in logs/encoder.json."""
+    cache = os.path.join(studio_root(), "logs", "encoder.json")
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    known = read_json(cache, {}) or {}
+    if known.get("ffmpeg") == ffmpeg and "nvenc" in known:
+        return known["nvenc"]
+    found = None
+    try:
+        listing = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20).stdout
+        if "h264_nvenc" in listing:
+            for args in NVENC_TRIES:
+                test = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                       "color=c=black:s=320x240:r=30:d=0.5", *args, "-cq", "23", "-f", "null", "-"],
+                                      capture_output=True, text=True, timeout=60)
+                if test.returncode == 0:
+                    found = args
+                    break
+    except (OSError, subprocess.TimeoutExpired):
+        found = None
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        write_json(cache, {"ffmpeg": ffmpeg, "nvenc": found})
+    except OSError:
+        pass
+    return found
+
+
+def encoder():
+    """("x264" | "nvenc", base args). NVENC moves video encoding from the CPU to the graphics card's encoder chip.
+
+    Choose with workspace/settings.json "encoder": "auto" (default), "cpu" or "nvenc", or PSTUDIO_ENCODER.
+    """
+    choice = (os.environ.get("PSTUDIO_ENCODER") or settings().get("encoder") or "auto").lower()
+    if choice not in _encoder:
+        nv = _nvenc_args() if choice in ("auto", "nvenc") else None
+        if choice == "nvenc" and not nv:
+            log("  NVENC was asked for but does not work here - using the CPU encoder")
+        _encoder[choice] = ("nvenc", nv) if nv else ("x264", X264)
+    return _encoder[choice]
+
+
+def venc(quality=20):
+    """Video encoder arguments for one output at `quality` (CRF-like: lower is better), plus this app's tag."""
+    kind, args = encoder()
+    q = ["-cq", str(quality + 1)] if kind == "nvenc" else ["-crf", str(quality)]
+    return list(args) + q + ["-metadata", f"comment=pstudio-enc={kind}-{ENC_VERSION}"]
+
+
+def enc_tag():
+    return f"pstudio-enc={encoder()[0]}-{ENC_VERSION}"
+
+
+def probe(path):
+    """Key facts about a media file for deciding whether it can be joined without re-encoding."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                          "stream=codec_type,codec_name,profile,width,height,pix_fmt,r_frame_rate,sample_rate,channels"
+                          ":format=duration:format_tags=comment", "-of", "json", path], capture_output=True, text=True)
+    try:
+        data = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    info = {"tag": (data.get("format", {}).get("tags", {}) or {}).get("comment", ""),
+            "duration": float(data.get("format", {}).get("duration") or 0)}
+    for st in data.get("streams", []):
+        kind = st.get("codec_type")
+        if kind == "video" and "video" not in info:
+            info["video"] = (st.get("codec_name"), st.get("profile"), st.get("width"), st.get("height"),
+                             st.get("pix_fmt"), st.get("r_frame_rate"))
+        elif kind == "audio" and "audio" not in info:
+            info["audio"] = (st.get("codec_name"), st.get("sample_rate"), st.get("channels"))
+    return info
+
+
+def joinable(paths, width, height, fps="30/1"):
+    """True when every clip was written by this app's current encoder at this size and frame rate, with AAC
+    48 kHz stereo sound, so they can be joined by copying (no re-encode)."""
+    tag = enc_tag()
+    first = None
+    for p in paths:
+        info = probe(p)
+        v, a = info.get("video"), info.get("audio")
+        if info["tag"] != tag or not v or not a or v[2:4] != (width, height) or v[4] != "yuv420p" or v[5] != fps:
+            return False
+        if a != ("aac", "48000", 2):
+            return False
+        if first is None:
+            first = v
+        elif v != first:
+            return False
+    return bool(paths)
+
+
+def free_gpu():
+    """Unload any language model Ollama is holding so the graphics card's memory is free for the next model."""
+    try:
+        import llm
+        llm.unload_all()
+    except Exception:  # noqa: BLE001 - Ollama not installed or not running: nothing to free
+        pass
+
+
+# ------------------------------------------------------------------ transcription
 def _faster_whisper(path, model_size, language, device, words):
     """Run faster-whisper. Returns [{"start", "end", "text", "words": [[start, end, word], ...]}]."""
     _expose_torch_cuda_dlls()
@@ -1802,12 +1958,7 @@ def _whisperx(exe, path, model_size, language):
     return out
 
 
-def transcribe_words(path, model_size="small", language=None, device=None):
-    """Transcribe with word-level timing: [{"start", "end", "text", "words": [[start, end, word]], "speaker"?}].
-
-    Uses WhisperX when its optional environment is installed (more exact word timing, and who-said-what
-    when HF_TOKEN is set); otherwise faster-whisper's built-in word timestamps.
-    """
+def _transcribe_piece(path, model_size, language, device):
     exe = whisperx_exe()
     if exe and device != "cpu":
         try:
@@ -1815,6 +1966,63 @@ def transcribe_words(path, model_size="small", language=None, device=None):
         except Exception as e:  # noqa: BLE001
             log(f"  WhisperX failed ({e}); using the built-in transcriber")
     return _faster_whisper(path, model_size, language, device, words=True)
+
+
+def chunk_seconds():
+    return float(os.environ.get("PSTUDIO_CHUNK_SECONDS") or 600)
+
+
+def _clock(t):
+    return f"{int(t // 60)}:{int(t % 60):02}"
+
+
+def transcribe_words(path, model_size="small", language=None, device=None, cache=None):
+    """Transcribe with word-level timing: [{"start", "end", "text", "words": [[start, end, word]], "speaker"?}].
+
+    Uses WhisperX when its optional environment is installed (more exact word timing, and who-said-what
+    when HF_TOKEN is set); otherwise faster-whisper's built-in word timestamps.
+
+    Long recordings are done in 10-minute pieces from a small 16 kHz copy of the sound. Each piece starts where
+    the last finished sentence ended, so no word is cut in half. With `cache` (a JSON path) finished pieces are
+    saved, and an interrupted run carries on where it stopped.
+    """
+    import tempfile
+
+    total, step, overlap = duration(path), chunk_seconds(), 30.0
+    if total <= step + overlap:
+        return _transcribe_piece(path, model_size, language, device)
+    state = read_json(cache, None) if cache else None
+    if not (isinstance(state, dict) and state.get("source") == os.path.abspath(path) and state.get("total") == round(total, 2)):
+        state = {"source": os.path.abspath(path), "total": round(total, 2), "next": 0.0, "segments": []}
+    elif state["next"] > 0:
+        log(f"  resuming the transcript at {_clock(state['next'])}")
+    tmp = tempfile.mkdtemp(prefix="pstudio_tx_")
+    try:
+        sound = os.path.join(tmp, "sound.wav")       # decode the recording once: 16 kHz mono is ~2 MB a minute
+        subprocess.run(FF + ["-i", path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", sound], check=True)
+        t = state["next"]
+        while t < total - 0.5:
+            length = min(step + overlap, total - t)
+            last = t + length >= total - 0.5
+            piece = os.path.join(tmp, "piece.wav")
+            subprocess.run(FF + ["-ss", f"{t:.3f}", "-t", f"{length:.3f}", "-i", sound, "-c:a", "pcm_s16le", piece],
+                           check=True)
+            segs = _transcribe_piece(piece, model_size, language, device)
+            keep = [s for s in segs if last or s["start"] < step]
+            for s in keep:
+                s["start"], s["end"] = round(s["start"] + t, 2), round(s["end"] + t, 2)
+                s["words"] = [[round(a + t, 2), round(b + t, 2), w] for a, b, w in s.get("words") or []]
+            state["segments"] += keep
+            nxt = keep[-1]["end"] if keep and not last else t + step
+            t = total if last else max(nxt, t + 1.0)
+            state["next"] = round(t, 2)
+            if cache:
+                write_json(cache, state)
+            log(f"  transcribed {_clock(min(t, total))} of {_clock(total)}")
+        return state["segments"]
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
 
 
 def transcribe(path, model_size="small", language=None, device=None):
@@ -1955,9 +2163,26 @@ def pick_model(preferred=DEFAULT_MODEL):
     raise RuntimeError(f"No local chat model is installed. Run: ollama pull {DEFAULT_MODEL}")
 
 
-def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=8192, schema=None):
-    """One chat turn. keep_alive=0 unloads the model afterwards so the GPU is free for the next stage.
+CONTEXT_SIZES = (2048, 4096, 6144, 8192)
 
+
+def context_size(system, user, reply_tokens=1536):
+    """The smallest context window that fits this request.
+
+    The model's working memory for the conversation (its KV cache) grows with the window: for a 4B model a
+    window of 8192 takes about 1 GB of graphics memory, 4096 about half that. On a 4 GB card a needlessly large
+    window pushes part of the model onto the CPU, which is several times slower.
+    """
+    need = (len(system) + len(user)) / 3.2 + reply_tokens      # about 3.2 characters per token for English
+    return next((c for c in CONTEXT_SIZES if c >= need), CONTEXT_SIZES[-1])
+
+
+def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_ctx=None, schema=None,
+         keep_alive=0, reply_tokens=1536):
+    """One chat turn.
+
+    keep_alive=0 unloads the model afterwards so the GPU is free for the next stage. Loops that make several
+    calls in a row pass keep_alive="5m" and call unload() when they finish, so the model loads once, not every call.
     `schema` (a JSON schema dict) makes Ollama constrain the reply to that shape; older Ollama
     versions that reject it fall back to plain JSON mode.
     """
@@ -1965,9 +2190,10 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
     payload = {
         "model": model,
         "stream": False,
-        "keep_alive": 0,
+        "keep_alive": keep_alive,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "options": {"temperature": temperature, "num_ctx": num_ctx},
+        "options": {"temperature": temperature,
+                    "num_ctx": num_ctx or context_size(system, user, reply_tokens)},
     }
     if schema:
         as_json = True
@@ -1997,14 +2223,39 @@ def chat(system, user, model=DEFAULT_MODEL, as_json=False, temperature=0.7, num_
 
 
 def embed(texts, model=EMBED_MODEL, batch=32):
-    """Return a list of embedding vectors (lists of floats)."""
+    """Return a list of embedding vectors (lists of floats). The model stays loaded between batches."""
     ensure_server()
     ensure_model(model)
     vectors = []
     for i in range(0, len(texts), batch):
-        out = _post("/api/embed", {"model": model, "input": texts[i:i + batch], "keep_alive": 0})
+        last = i + batch >= len(texts)
+        out = _post("/api/embed", {"model": model, "input": texts[i:i + batch], "keep_alive": 0 if last else "2m"})
         vectors.extend(out["embeddings"])
     return vectors
+
+
+def unload(model):
+    """Free the graphics memory a model is using (no-op if it is not loaded)."""
+    try:
+        _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def unload_all():
+    """Unload every model Ollama has in memory. Does nothing if Ollama is not running (it is not started)."""
+    if not server_up():
+        return []
+    try:
+        loaded = [m.get("name") or m.get("model") for m in _get("/api/ps").get("models", [])]
+    except Exception:  # noqa: BLE001
+        return []
+    for name in loaded:
+        if name:
+            unload(name)
+    if loaded:
+        log(f"  freed graphics memory held by {', '.join(loaded)}")
+    return loaded
 '@
 $files['library.py'] = @'
 """Footage library: transcribe your episodes once, then find the moment that matches a line of script.
@@ -2013,6 +2264,7 @@ Index:  python library.py index <folder-with-videos> --lib <workspace>/library
 Search: python library.py search "topic words" --lib <workspace>/library
 """
 import argparse
+import hashlib
 import math
 import os
 import re
@@ -2067,7 +2319,14 @@ def pick_soundbite(chunk, query, min_s=4.0, max_s=10.0):
     return round(start, 2), round(end - start + 0.2, 2), rel, rel_words
 
 
-def index(folder, lib, whisper="small", use_embeddings=True):
+def index(folder, lib, whisper="small", use_embeddings=True, proxies=None):
+    """Transcribe every video in `folder` into the searchable index. Long episodes are done in 10-minute pieces
+    and an interrupted run resumes. Footage larger than 1080p also gets a 1080p working copy (see visuals.make_proxy),
+    unless workspace/settings.json says "proxies": false."""
+    from common import free_gpu, settings
+    if proxies is None:
+        proxies = settings().get("proxies", True) is not False
+    free_gpu()
     ensure_dir(lib)
     path = os.path.join(lib, "index.json")
     data = read_json(path, {"files": {}, "chunks": []})
@@ -2086,11 +2345,22 @@ def index(folder, lib, whisper="small", use_embeddings=True):
             log(f"[{n}/{len(videos)}] upgrading the index with word timing: {os.path.basename(video)}")
         log(f"[{n}/{len(videos)}] indexing {os.path.basename(video)}")
         data["chunks"] = [c for c in data["chunks"] if c["file"] != video]
-        for start, end, text, segs, words in _chunks(transcribe_words(video, whisper)):
+        partial = os.path.join(lib, "partial", hashlib.sha1(f"{video}|{stamp}".encode("utf-8")).hexdigest()[:16] + ".json")
+        os.makedirs(os.path.dirname(partial), exist_ok=True)
+        for start, end, text, segs, words in _chunks(transcribe_words(video, whisper, cache=partial)):
             data["chunks"].append({"file": video, "start": round(start, 2), "end": round(end, 2),
                                    "text": text, "segs": segs, "words": words})
         data["files"][video] = stamp
         write_json(path, data)  # save after every file so a long run can resume
+        if os.path.exists(partial):
+            os.remove(partial)
+    if proxies:
+        import visuals
+        for video in sorted(videos):
+            try:
+                visuals.make_proxy(video)
+            except Exception as e:  # noqa: BLE001 - a missing working copy only makes later cuts slower
+                log(f"  could not make a working copy of {os.path.basename(video)}: {e}")
 
     if use_embeddings:
         todo = [c for c in data["chunks"] if "vec" not in c]
@@ -2164,12 +2434,13 @@ def main():
     i.add_argument("--lib", required=True)
     i.add_argument("--whisper", default="small")
     i.add_argument("--no-embeddings", action="store_true")
+    i.add_argument("--no-proxies", action="store_true", help="Do not make 1080p working copies of 4K footage")
     s = sub.add_parser("search")
     s.add_argument("query")
     s.add_argument("--lib", required=True)
     a = ap.parse_args()
     if a.cmd == "index":
-        index(a.folder, a.lib, a.whisper, not a.no_embeddings)
+        index(a.folder, a.lib, a.whisper, not a.no_embeddings, proxies=False if a.no_proxies else None)
     else:
         hit = Library(a.lib).search(a.query)
         log(str(hit and {k: v for k, v in hit.items() if k != "vec"}))
@@ -2184,7 +2455,7 @@ import argparse
 import os
 import textwrap
 
-from common import FF, FORMATS, duration, log, run
+from common import FF, FORMATS, duration, log, run, venc
 
 FONTS = [r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -2264,8 +2535,7 @@ def kenburns(image, out_mp4, seconds, fmt="9:16", zoom=0.10):
     vf = (f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
           f"zoompan=z='min(1+{step:.7f}*on,{1 + zoom})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
           f":d={frames}:s={W}x{H}:fps=30,fade=t=in:st=0:d=0.3,format=yuv420p")
-    run(FF + ["-i", image, "-vf", vf, "-frames:v", frames, "-c:v", "libx264", "-preset", "veryfast",
-              "-crf", "20", "-an", out_mp4])
+    run(FF + ["-i", image, "-vf", vf, "-frames:v", frames, *venc(20), "-an", out_mp4])
     return out_mp4
 
 
@@ -2479,9 +2749,58 @@ def footage_filter(src_w, src_h, W, H, layout):
     return f"[0:v]scale={sw}:{sh},crop={W}:{H}:{x}:{y},{tail}"
 
 
+# ------------------------------------------------------------------ 1080p working copies of large footage
+def proxy_dir():
+    from common import studio_root
+    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "workspace", "proxies")
+
+
+def _proxy_path(src):
+    import hashlib
+    st = os.stat(src)
+    key = f"{os.path.abspath(src)}|{st.st_size}|{int(st.st_mtime)}"
+    return os.path.join(proxy_dir(), hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".mp4")
+
+
+def needs_proxy(src):
+    from common import video_size
+    w, h = video_size(src)
+    return max(w, h) > 1920
+
+
+def make_proxy(src):
+    """Write a 1080p copy of footage larger than 1080p, with a keyframe every second for fast, exact seeking.
+
+    The finished videos are 1080p at most, so nothing is lost; every later cut and face scan reads a quarter of
+    the pixels. Made once per episode (when it is indexed) and reused. Returns the copy's path, or None.
+    """
+    if not needs_proxy(src):
+        return None
+    out = _proxy_path(src)
+    if os.path.exists(out) and abs(duration(out) - duration(src)) < 1.0:
+        return out
+    os.makedirs(proxy_dir(), exist_ok=True)
+    log(f"  making a 1080p working copy of {os.path.basename(src)} (one time; speeds up every later cut)")
+    part = out + ".part.mp4"
+    run(FF + ["-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+              "scale=1920:1920:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+              *venc(18), "-g", "30", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", part])
+    os.replace(part, out)
+    return out
+
+
+def working_copy(src):
+    """The 1080p working copy of `src` if one has been made, else `src` itself."""
+    try:
+        p = _proxy_path(src)
+    except OSError:
+        return src
+    return p if os.path.exists(p) else src
+
+
 def _encode(src, start, seconds, out_mp4, graph, sound):
     run(FF + ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", src, "-filter_complex", graph, "-map", "[v]", *sound,
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_mp4])
+              *venc(20), out_mp4])
 
 
 def _speaker_cut(src, start, seconds, out_mp4, size, src_size, boxes, audio):
@@ -2528,6 +2847,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     from common import video_size
 
     W, H = FORMATS[fmt]
+    src = working_copy(src)
     total = duration(src)
     start = max(0.0, min(float(start), max(0.0, total - seconds)))
     src_w, src_h = video_size(src)
@@ -2557,7 +2877,7 @@ def footage_clip(src, start, out_mp4, seconds, fmt="9:16", audio=False, layout=N
     if not audio and duration(out_mp4) < seconds - 0.5:  # source too short: freeze the last frame
         padded = out_mp4 + ".pad.mp4"
         run(FF + ["-i", out_mp4, "-vf", f"tpad=stop_mode=clone:stop_duration={seconds}", "-t", f"{seconds:.2f}",
-                  "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", padded])
+                  "-an", *venc(20), padded])
         os.replace(padded, out_mp4)
     return layout[0]
 
@@ -2582,6 +2902,9 @@ class StillMaker:
         log(f"Loading {self.model} ({self.dtype}, {'cuda' if cuda else 'cpu'})...")
         pipe = StableDiffusionPipeline.from_pretrained(self.model, torch_dtype=self.dtype, safety_checker=None)
         pipe.enable_attention_slicing()
+        pipe.enable_vae_slicing()                  # decode the image in pieces: less graphics memory
+        from common import free_gpu
+        free_gpu()                                 # a language model left in memory would not leave room
         if cuda:
             (pipe.enable_sequential_cpu_offload if fp32 else pipe.enable_model_cpu_offload)()
         self.pipe = pipe
@@ -3026,7 +3349,7 @@ import shutil
 import subprocess
 import tempfile
 
-from common import FF, duration, log, studio_root
+from common import FF, duration, free_gpu, log, studio_root, venc
 
 
 def repo_dir():
@@ -3051,11 +3374,11 @@ def sync(video, audio, timeout=3600):
     if not available():
         log("  lip-sync is not installed (run the installer with -WithLipSync)")
         return False
+    free_gpu()                                    # MuseTalk needs the whole 4 GB card
     repo, tmp = repo_dir(), tempfile.mkdtemp(prefix="pstudio_lip_")
     try:
         src = os.path.join(tmp, "in.mp4")       # MuseTalk expects 25 fps
-        subprocess.run(FF + ["-i", video, "-vf", "fps=25", "-an", "-c:v", "libx264", "-preset", "veryfast",
-                             "-crf", "18", src], check=True)
+        subprocess.run(FF + ["-i", video, "-vf", "fps=25", "-an", *venc(18), src], check=True)
         cfg = os.path.join(tmp, "task.yaml")
         with open(cfg, "w", encoding="utf-8") as f:
             f.write("task_0:\n"
@@ -3073,8 +3396,7 @@ def sync(video, audio, timeout=3600):
         if done.returncode != 0 or not os.path.exists(result) or duration(result) < 0.3:
             log("  lip-sync failed - keeping the original picture: " + (done.stderr or done.stdout or "no output")[-300:].strip())
             return False
-        subprocess.run(FF + ["-i", result, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                             "-pix_fmt", "yuv420p", video + ".sync.mp4"], check=True)
+        subprocess.run(FF + ["-i", result, "-an", "-vf", "fps=30", *venc(20), video + ".sync.mp4"], check=True)
         os.replace(video + ".sync.mp4", video)
         return True
     except Exception as e:  # noqa: BLE001 - lip-sync is a bonus, never a blocker
@@ -3416,7 +3738,7 @@ def stage_script(project, cfg, force):
     t0, best, feedback = time.time(), None, ""
     for attempt in range(3):
         raw = llm.chat(system, base + feedback, cfg["model"], schema=scene_schema(kinds),
-                       temperature=0.6 + 0.1 * attempt)
+                       temperature=0.6 + 0.1 * attempt, keep_alive="5m")
         scenes = clean_scenes(raw, kinds)
         if len(scenes) < 3:
             log(f"  attempt {attempt + 1}: unusable script, retrying")
@@ -3430,6 +3752,7 @@ def stage_script(project, cfg, force):
         log(f"  attempt {attempt + 1}: would run ~{est:.0f}s, target {target:.0f}s - asking for a rewrite")
         feedback = (f"\n\nYour last draft would run about {est:.0f} seconds. Rewrite it to run about {target:.0f} "
                     f"seconds by {'adding' if est < target else 'cutting'} narration.")
+    llm.unload(cfg["model"])
     if best is None:
         fail("The local model did not produce a usable script. Try another model in the Create tab.")
     est, scenes, title = best
@@ -3500,7 +3823,9 @@ def stage_voice(project, cfg, force):
     if os.path.exists(txt):
         ref_text = read_text(txt).strip() or None
 
+    from common import free_gpu
     from tts import Voice
+    free_gpu()            # the voice model needs the graphics card; a language model left loaded would not fit
     t0, before = time.time(), gpu_used_mb()
     voice = Voice(ref, ref_text, device=cfg.get("device", "cuda"), language=cfg.get("language", "English"))
     for i, s, wav in todo:
@@ -3591,8 +3916,17 @@ def stage_render(project, cfg, force):
     kit = brand.load(project)
     sdir = ensure_dir(os.path.join(project, "scenes"))
     W, H = FORMATS[cfg["format"]]
-    enc = ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    from common import enc_tag, probe, venc
+    enc = ["-r", "30", *venc(18), "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    sound = ["-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    copied = 0
+
+    def reusable(vis, secs):
+        """The picture was written by this app at the final size and is long enough: copy it, don't re-encode."""
+        info = probe(vis)
+        v = info.get("video")
+        return (info["tag"] == enc_tag() and v is not None and v[2:6] == (W, H, "yuv420p", "30/1")
+                and info["duration"] >= secs - 0.02)
     clips, words, offset = [], [], 0.0
     for i, s in enumerate(script["scenes"], 1):
         vis = os.path.join(project, "visuals", f"scene_{i:02}.mp4")
@@ -3608,17 +3942,27 @@ def stage_render(project, cfg, force):
         elif s["visual"] == "soundbite":
             secs = duration(vis)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.03,afade=t=out:st={max(0, secs - 0.08):.3f}:d=0.08"
-            run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
-                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+            if reusable(vis, secs):
+                run(FF + ["-i", vis, "-filter_complex", f"[0:a]{fades}[a]", "-map", "0:v", "-map", "[a]",
+                          "-t", f"{secs:.3f}", "-c:v", "copy", *sound, "-metadata", f"comment={enc_tag()}", out])
+                copied += 1
+            else:
+                run(FF + ["-i", vis, "-filter_complex", f"[0:v]scale={W}:{H},setsar=1[v];[0:a]{fades}[a]",
+                          "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         else:
             if not os.path.exists(wav):
                 fail(f"Missing {wav} - run the voice stage first.")
             secs = duration(wav)
             fades = f"loudnorm=I=-16:TP=-1.5,afade=t=in:d=0.02,afade=t=out:st={max(0, secs - 0.04):.3f}:d=0.04"
-            # hold the last frame if the picture is shorter than the voice line, then cut to the voice
-            run(FF + ["-i", vis, "-i", wav, "-filter_complex",
-                      f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
-                      "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
+            if reusable(vis, secs):
+                run(FF + ["-i", vis, "-i", wav, "-filter_complex", f"[1:a]{fades}[a]", "-map", "0:v", "-map", "[a]",
+                          "-t", f"{secs:.3f}", "-c:v", "copy", *sound, "-metadata", f"comment={enc_tag()}", out])
+                copied += 1
+            else:
+                # hold the last frame if the picture is shorter than the voice line, then cut to the voice
+                run(FF + ["-i", vis, "-i", wav, "-filter_complex",
+                          f"[0:v]scale={W}:{H},setsar=1,tpad=stop_mode=clone:stop_duration=2[v];[1:a]{fades}[a]",
+                          "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}", *enc, out])
         real = duration(out)
         if s["visual"] == "soundbite":
             exact = s["source"].get("words")
@@ -3650,7 +3994,9 @@ def stage_render(project, cfg, force):
     run(cmd)
     got = duration(final)
     ok = abs(got - offset) < 1.5
-    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2),
+    if copied:
+        log(f"{copied} scene(s) joined to their sound without re-encoding the picture")
+    record_metric(project, "render", final_seconds=round(got, 2), expected_seconds=round(offset, 2), scenes_copied=copied,
                   duration_ok=ok, caption_seconds=round(covered, 2))
     log(f"{'OK' if ok else 'WARNING: length mismatch'} - final video {got:.1f}s (scenes total {offset:.1f}s)")
     log(f"FINAL: {final}")
@@ -3947,7 +4293,8 @@ def rate(cands, model, bible=""):
                 "Rambling, greetings and housekeeping score low. Give each a headline of at most 7 words.\n\n"
                 f"{listing}\n\nReturn JSON: {{\"ratings\": [{{\"id\": <number in brackets>, \"score\": 0-100, \"title\": str}}]}}")
         try:
-            got = llm.chat(system, user, model, schema=SCHEMA, temperature=0.2).get("ratings") or []
+            got = llm.chat(system, user, model, schema=SCHEMA, temperature=0.2, keep_alive="5m",
+                           reply_tokens=900).get("ratings") or []
         except Exception as e:  # noqa: BLE001 - one bad batch should not stop the run
             log(f"  rating failed for passages {at}-{at + len(batch) - 1} ({e})")
             got = []
@@ -3960,6 +4307,7 @@ def rate(cands, model, bible=""):
             except (KeyError, TypeError, ValueError):
                 continue
         log(f"  rated {min(at + BATCH, len(cands))}/{len(cands)} passages")
+    llm.unload(model)          # free the graphics card before cutting clips
     for c in cands:
         c.setdefault("score", 0)
         c.setdefault("title", "")
@@ -4071,7 +4419,7 @@ import shutil
 import subprocess
 import tempfile
 
-from common import FF, FORMATS, duration, fail, log, run, transcribe, write_srt
+from common import FF, FORMATS, duration, fail, joinable, log, run, transcribe, venc, write_srt
 
 LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
@@ -4102,23 +4450,25 @@ def main():
     W, H = FORMATS[a.format]
     tmp = tempfile.mkdtemp(prefix="pstudio_")
     try:
-        # 1. normalise every clip (size, fps, audio) so concat is safe
+        # 1. normalise every clip (size, fps, audio) so concat is safe - unless this app already wrote them that way
         norm = []
-        for i, c in enumerate(a.clips):
+        if joinable(a.clips, W, H):
+            log(f"{len(a.clips)} clips already match - joining without re-encoding")
+            norm = [os.path.abspath(c) for c in a.clips]
+        for i, c in enumerate([] if norm else a.clips):
             o = os.path.join(tmp, f"n{i:03}.mp4")
             vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                   f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p,setsar=1")
             cmd = FF + ["-i", c]
             if not has_audio(c):
                 cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest"]
-            cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                    "-c:a", "aac", "-ar", "48000", "-ac", "2", o]
+            cmd += ["-vf", vf, *venc(18), "-c:a", "aac", "-ar", "48000", "-ac", "2", o]
             log(f"Normalising {os.path.basename(c)}")
             run(cmd)
             norm.append(o)
         with open(os.path.join(tmp, "list.txt"), "w", encoding="utf-8") as f:
             for n in norm:
-                f.write(f"file '{os.path.basename(n)}'\n")
+                f.write("file '" + n.replace(os.sep, "/").replace("'", "'\\''") + "'\n")
         run(FF + ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "joined.mp4"], cwd=tmp)
         joined = os.path.join(tmp, "joined.mp4")
 
@@ -4166,8 +4516,7 @@ def main():
             graph += [f"[{n}:v]scale={int(W * 0.16)}:-1[logo]", f"{picture}[logo]overlay={x}:{pad}[branded]"]
             picture = "[branded]"
         if picture != "[0:v]":
-            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+            cmd += ["-filter_complex", ";".join(graph), "-map", picture, "-map", "[aout]", *venc(20)]
         else:
             cmd += ["-filter_complex", ";".join(graph), "-map", "0:v", "-map", "[aout]", "-c:v", "copy"]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
@@ -4420,7 +4769,7 @@ def trial(model, target, outline, kinds):
     system, user = pipeline.script_request(outline, target, kinds)
     t0 = time.time()
     try:
-        raw = llm.chat(system, user, model, schema=pipeline.scene_schema(kinds), temperature=0.6)
+        raw = llm.chat(system, user, model, schema=pipeline.scene_schema(kinds), temperature=0.6, keep_alive="5m")
     except Exception as e:  # noqa: BLE001
         return 0.0, time.time() - t0, f"error: {str(e)[:60]}"
     took = time.time() - t0
@@ -4459,7 +4808,9 @@ def main():
     rows = []
     for m in models:
         log(f"Testing {m}...")
+        trial(m, *OUTLINES[1], kinds)               # warm-up: loading the model should not count against its speed
         runs = [trial(m, target, outline, kinds) for target, outline in OUTLINES]
+        llm.unload(m)
         for points, took, note in runs:
             log(f"   {points:5.1f} points in {took:5.1f}s  ({note})")
         rows.append({"model": m, "score": round(sum(r[0] for r in runs) / len(runs), 1),
@@ -4652,23 +5003,37 @@ if __name__ == "__main__":
 $files['recording.py'] = @'
 """Edit a raw recording, the hybrid way: this PC prepares it, Claude Code edits it with the Herk Edit Kit.
 
-  python recording.py prepare --recording take.mp4 --slug my-take      copy into the kit, transcribe locally,
-                                                                      write the prompts for Claude Code
-  python recording.py tighten --recording take.mp4 --out tight.mp4    quick local silence trim, no AI
+  python recording.py prepare --recording take.mp4 --slug my-take [--tighten]
+        copy into the kit, transcribe locally (and optionally remove pauses here), write the prompts for Claude Code
+  python recording.py split   --recording long.mp4 --slug my-talk --minutes 8 [--tighten]
+        cut a long recording into parts at natural pauses; each part becomes its own kit project
+  python recording.py join    --slug my-talk                       join the edited parts into one video
+  python recording.py tighten --recording take.mp4 --out tight.mp4  quick local silence trim, no AI
+  python recording.py render  --video in.mp4 --keep keep.json --out out.mp4
+        render a list of kept time ranges piece by piece (memory-safe; Claude Code is told to use this)
 
 The Herk Edit Kit (MIT, by Nate Herk) lives in <PodcastStudio>/repos/herk-edit-kit. Its skills run inside
 Claude Code, which is a cloud model: the transcript and editing decisions go to Claude; the video files stay here.
+
+Memory: cutting many pieces out of one video with a single ffmpeg filter graph (trim/atrim + concat) keeps
+decoded frames for every later piece in memory. Measured on a 10-minute 1080p file with 60 cuts it passed
+13 GB and was killed. Everything here renders one piece at a time instead (under 0.5 GB).
 """
 import argparse
+import glob
 import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 
-from common import FF, duration, ensure_dir, fail, log, read_json, studio_root, transcribe_words, write_json, write_text
+from common import (FF, FORMATS, duration, ensure_dir, fail, log, read_json, studio_root, transcribe_words, venc,
+                    video_size, write_json, write_text)
 
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILLS = {"short": "short-form-edit", "long": "edit-video"}
+APP = os.path.dirname(os.path.abspath(__file__))
 
 
 def kit_dir():
@@ -4686,18 +5051,31 @@ def kit_transcript(segments, seconds):
             "words": words}
 
 
-def prompt(slug, kind, workspace):
+def prompt(slug, kind, workspace, tightened=False):
     """What the app asks Claude Code to do, as plain text the user can read and change."""
     rules = os.path.join(workspace, "house-rules.md")
     brand = os.path.join(workspace, "brand.json")
     bible = os.path.join(workspace, "style-bible.md")
+    render = os.path.join(APP, "recording.py")
+    py = sys.executable
+    if tightened:
+        source = (f"- Source: video-projects/{slug}/assets/silenced.mp4 with its transcript silenced.json. Pauses were "
+                  "already removed on this PC, so skip the cut-silences render and start with mistakes. raw.mp4 and "
+                  "raw.json are the untouched original; keep them.\n")
+    else:
+        source = (f"- Source: video-projects/{slug}/assets/raw.mp4. Keep it untouched. Transcript: "
+                  f"video-projects/{slug}/assets/raw.json, made on this PC in this kit's word-level format.\n")
     return (
         f"Use the {SKILLS[kind]} skill to edit the recording in video-projects/{slug}.\n\n"
-        f"- Source: video-projects/{slug}/assets/raw.mp4. Keep it untouched.\n"
-        f"- Transcript: video-projects/{slug}/assets/raw.json was made on this PC and is already in this kit's "
-        "word-level format. Do not call ElevenLabs, Kie.ai or any other paid or cloud service, and do not upload "
-        "the footage anywhere.\n"
+        + source +
+        "- Do not call ElevenLabs, Kie.ai or any other paid or cloud service, and do not upload the footage anywhere.\n"
         "- Follow the kit's order: cut silences, then mistakes, then the story and motion graphics.\n"
+        "- This PC has 16 GB of memory and a 4 GB graphics card. Do not render cuts with one ffmpeg filter graph of "
+        "many trim/atrim filters: it keeps frames for every later piece in memory and runs out on long recordings. "
+        f"To render a list of kept ranges, write them as JSON [[start, end], ...] in seconds and run:\n"
+        f"  \"{py}\" \"{render}\" render --video <input.mp4> --keep <keep.json> --out <output.mp4>\n"
+        "  It renders one piece at a time and joins them. If a HyperFrames render runs out of memory, render the "
+        "composition in shorter sections and join them the same way.\n"
         f"- House rules: read {rules} if it exists and follow every rule. When I give you a note about the edit, "
         "apply it and add it to that file as one short rule so the next edit follows it too.\n"
         f"- Brand: use the colours, font and logo in {brand} if it exists. Show style: {bible} if it exists.\n"
@@ -4705,12 +5083,11 @@ def prompt(slug, kind, workspace):
         "and tell me its path.\n")
 
 
-def prepare(recording, slug, workspace, whisper="small"):
+def _kit_project(slug):
+    """Create (or reuse) video-projects/<slug> inside the kit. Returns its folder."""
     kit = kit_dir()
     if not os.path.exists(os.path.join(kit, "CLAUDE.md")):
         fail(f"The Herk Edit Kit is not installed at {kit}. Re-run Setup-PodcastStudio.ps1.")
-    if not os.path.exists(recording):
-        fail(f"Recording not found: {recording}")
     if not SLUG.match(slug):
         fail("The project name must be lowercase letters, digits and dashes, like my-first-take.")
     project = os.path.join(kit, "video-projects", slug)
@@ -4727,28 +5104,146 @@ def prepare(recording, slug, workspace, whisper="small"):
         if not made:
             for sub in ("assets", "compositions", "renders"):
                 ensure_dir(os.path.join(project, sub))
-    assets = ensure_dir(os.path.join(project, "assets"))
+    ensure_dir(os.path.join(project, "assets"))
+    return project
+
+
+def _finish_project(project, slug, workspace, words, total, tighten):
+    """Write raw.json (and silenced.mp4/.json when tightening) and the two prompts."""
+    assets = os.path.join(project, "assets")
+    write_json(os.path.join(assets, "raw.json"), kit_transcript_from_words(words, total))
+    if tighten:
+        silenced = os.path.join(assets, "silenced.mp4")
+        ranges = keep_ranges(words, total)
+        if not os.path.exists(silenced) or abs(duration(silenced) - sum(b - a for a, b in ranges)) > 0.5:
+            log("Removing pauses on this PC...")
+            render_pieces(os.path.join(assets, "raw.mp4"), ranges, silenced)
+        moved = retime(words, ranges)
+        write_json(os.path.join(assets, "silenced.json"), kit_transcript_from_words(moved, duration(silenced)))
+    for kind in SKILLS:
+        write_text(os.path.join(project, f"prompt-{kind}.txt"), prompt(slug, kind, workspace, tightened=tighten))
+
+
+def kit_transcript_from_words(words, seconds):
+    return {"text": " ".join(w for _, _, w in words), "audio_duration_secs": round(seconds, 3),
+            "words": [{"text": w, "start": a, "end": b} for a, b, w in words]}
+
+
+def _words(recording, whisper, cache):
+    segs = transcribe_words(recording, whisper, cache=cache)
+    words = [w for seg in segs for w in seg["words"]]
+    if not words:
+        fail("No speech was found in this recording.")
+    return words
+
+
+def prepare(recording, slug, workspace, whisper="small", tighten=False):
+    if not os.path.exists(recording):
+        fail(f"Recording not found: {recording}")
+    project = _kit_project(slug)
+    assets = os.path.join(project, "assets")
     raw = os.path.join(assets, "raw.mp4")
     if not os.path.exists(raw) or abs(duration(raw) - duration(recording)) > 0.5:
         if recording.lower().endswith(".mp4"):
             shutil.copy2(recording, raw)
         else:
             log("Converting the recording to MP4...")
-            subprocess.run(FF + ["-i", recording, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                                 "-c:a", "aac", "-b:a", "192k", raw], check=True)
-    transcript = os.path.join(assets, "raw.json")
-    if not os.path.exists(transcript):
+            subprocess.run(FF + ["-i", recording, *venc(18), "-c:a", "aac", "-b:a", "192k", raw], check=True)
+    cached = os.path.join(assets, "raw.words.json")
+    if os.path.exists(cached):
+        words = [tuple(w) for w in read_json(cached)]
+    else:
         log("Transcribing on this PC (word-level)...")
-        data = kit_transcript(transcribe_words(raw, whisper), duration(raw))
-        if not data["words"]:
-            fail("No speech was found in this recording.")
-        write_json(transcript, data)
-    words = len(read_json(transcript)["words"])
-    for kind in SKILLS:
-        write_text(os.path.join(project, f"prompt-{kind}.txt"), prompt(slug, kind, workspace))
-    log(f"Ready: {project}\n  raw.mp4 ({duration(raw):.0f}s), raw.json ({words} words), prompt-short.txt, prompt-long.txt")
+        words = _words(raw, whisper, os.path.join(assets, "raw.partial.json"))
+        write_json(cached, words)
+        if os.path.exists(os.path.join(assets, "raw.partial.json")):
+            os.remove(os.path.join(assets, "raw.partial.json"))
+    total = duration(raw)
+    _finish_project(project, slug, workspace, [list(w) for w in words], total, tighten)
+    log(f"Ready: {project}\n  raw.mp4 ({total:.0f}s), raw.json ({len(words)} words)"
+        + (", silenced.mp4" if tighten else "") + ", prompt-short.txt, prompt-long.txt")
     log(f"RECORDING PROJECT: {project}")
     return project
+
+
+def split_points(words, total, minutes):
+    """Where to cut a long recording into parts of about `minutes`: at the longest pause within a minute of
+    each target time, so no sentence is cut in half. Returns [(start, end), ...] covering the whole recording."""
+    size = minutes * 60.0
+    if total <= size * 1.25:
+        return [(0.0, round(total, 3))]
+    cuts, target = [], size
+    while target < total - size * 0.25:
+        best, width = None, 0.0
+        for (_, b0, _), (a1, _, _) in zip(words, words[1:]):
+            mid = (b0 + a1) / 2
+            if abs(mid - target) <= 60 and a1 - b0 > width:
+                best, width = mid, a1 - b0
+        cut = best if best is not None else target
+        cuts.append(round(cut, 3))
+        target = cut + size
+    edges = [0.0] + cuts + [round(total, 3)]
+    return list(zip(edges, edges[1:]))
+
+
+def split(recording, slug, workspace, minutes=8.0, whisper="small", tighten=False):
+    """Cut a long recording into parts at natural pauses, one kit project per part, so each edit and render
+    stays small enough for a 16 GB PC."""
+    if not os.path.exists(recording):
+        fail(f"Recording not found: {recording}")
+    if not SLUG.match(slug):
+        fail("The project name must be lowercase letters, digits and dashes, like my-first-take.")
+    if minutes < 2:
+        fail("Parts must be at least 2 minutes long.")
+    total = duration(recording)
+    cache_dir = ensure_dir(os.path.join(os.path.dirname(recording), ".pstudio"))
+    cached = os.path.join(cache_dir, make_slug(recording) + ".words.json")
+    if os.path.exists(cached) and (read_json(cached) or {}).get("total") == round(total, 2):
+        words = [list(w) for w in read_json(cached)["words"]]
+    else:
+        log("Transcribing on this PC (word-level, in 10-minute pieces)...")
+        words = _words(recording, whisper, os.path.join(cache_dir, make_slug(recording) + ".partial.json"))
+        write_json(cached, {"total": round(total, 2), "words": words})
+    parts = split_points(words, total, minutes)
+    if len(parts) == 1:
+        log(f"This recording is only {total / 60:.1f} minutes - no need to split it. Preparing it as one project.")
+        return [prepare(recording, slug, workspace, whisper, tighten)]
+    log(f"Splitting {total / 60:.1f} minutes into {len(parts)} parts at natural pauses...")
+    projects = []
+    for n, (a, b) in enumerate(parts, 1):
+        part_slug = f"{slug}-part-{n:02}"
+        project = _kit_project(part_slug)
+        raw = os.path.join(project, "assets", "raw.mp4")
+        if not os.path.exists(raw) or abs(duration(raw) - (b - a)) > 0.5:
+            render_pieces(recording, [(a, b)], raw)
+        mine = [[round(s - a, 2), round(e - a, 2), w] for s, e, w in words if s >= a - 0.01 and e <= b + 0.01]
+        _finish_project(project, part_slug, workspace, mine, duration(raw), tighten)
+        log(f"  part {n}: {a / 60:5.1f}-{b / 60:5.1f} min -> video-projects/{part_slug}")
+        projects.append(project)
+    log(f"PARTS: {len(projects)}")
+    return projects
+
+
+def join(slug):
+    """Join the newest render of every part of `slug` into video-projects/<slug>-joined.mp4."""
+    kit = kit_dir()
+    parts = sorted(glob.glob(os.path.join(kit, "video-projects", f"{slug}-part-[0-9][0-9]")))
+    if not parts:
+        fail(f"No parts named {slug}-part-01, -02 ... were found. Use 'Split into parts' first.")
+    clips, missing = [], []
+    for p in parts:
+        renders = sorted(glob.glob(os.path.join(p, "renders", "*.mp4")), key=os.path.getmtime)
+        (clips.append(renders[-1]) if renders else missing.append(os.path.basename(p)))
+    if missing:
+        fail("These parts have not been rendered yet: " + ", ".join(missing))
+    w, h = video_size(clips[0])
+    fmt = next((k for k, v in FORMATS.items() if v == (w, h)), "16:9" if w >= h else "9:16")
+    out = os.path.join(kit, "video-projects", f"{slug}-joined.mp4")
+    log(f"Joining {len(clips)} parts ({fmt})...")
+    subprocess.run([sys.executable, "-u", os.path.join(APP, "assemble.py"), "--clips", *clips, "--format", fmt,
+                    "--out", out], check=True)
+    log(f"JOINED: {out}")
+    return out
 
 
 def keep_ranges(words, total, gap=0.55, head=0.22, tail=0.34):
@@ -4777,30 +5272,65 @@ def retime(words, ranges):
     return out
 
 
+def render_pieces(src, ranges, out_mp4):
+    """Render the kept time ranges of `src` one at a time and join them: memory stays under about 0.5 GB however
+    long the recording is. Pieces keep their sound uncompressed until the end, so the joins have no gaps."""
+    ranges = [(float(a), float(b)) for a, b in ranges if float(b) - float(a) > 0.02]
+    if not ranges:
+        fail("Nothing to keep.")
+    tmp = tempfile.mkdtemp(prefix="pstudio_cut_")
+    try:
+        names = []
+        for n, (a, b) in enumerate(ranges):
+            name = f"p{n:04}.mkv"
+            subprocess.run(FF + ["-ss", f"{a:.3f}", "-i", src, "-t", f"{b - a:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
+                                 *venc(18), "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", os.path.join(tmp, name)],
+                           check=True)
+            names.append(name)
+            if len(ranges) > 20 and (n + 1) % 20 == 0:
+                log(f"  rendered {n + 1} of {len(ranges)} pieces")
+        with open(os.path.join(tmp, "list.txt"), "w", encoding="utf-8") as f:
+            f.write("".join(f"file '{x}'\n" for x in names))
+        os.makedirs(os.path.dirname(os.path.abspath(out_mp4)), exist_ok=True)
+        subprocess.run(FF + ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                             "-movflags", "+faststart", os.path.abspath(out_mp4)], cwd=tmp, check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_mp4
+
+
+def read_keep(path):
+    """Kept ranges from JSON: [[start, end], ...], [{"start", "end"}, ...], or {"keep": either of those}."""
+    data = read_json(path)
+    if isinstance(data, dict):
+        data = data.get("keep") or data.get("keepRanges") or data.get("ranges") or []
+    out = []
+    for r in data or []:
+        if isinstance(r, dict):
+            r = (r.get("start", r.get("from")), r.get("end", r.get("to")))
+        try:
+            a, b = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            fail(f"Could not read the range {r!r} in {path}.")
+        if b > a:
+            out.append((a, b))
+    if not out:
+        fail(f"No kept ranges found in {path}.")
+    return sorted(out)
+
+
 def tighten(recording, out_mp4, whisper="small"):
     """Trim dead air from a recording on this PC (no AI decisions): writes the video and its re-timed words."""
     if not os.path.exists(recording):
         fail(f"Recording not found: {recording}")
     total = duration(recording)
-    words = [w for seg in transcribe_words(recording, whisper) for w in seg["words"]]
+    words = [w for seg in transcribe_words(recording, whisper, cache=out_mp4 + ".partial.json") for w in seg["words"]]
+    if os.path.exists(out_mp4 + ".partial.json"):
+        os.remove(out_mp4 + ".partial.json")
     if not words:
         fail("No speech was found in this recording.")
     ranges = keep_ranges(words, total)
-    parts = []
-    for n, (a, b) in enumerate(ranges):
-        parts.append(f"[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[v{n}];"
-                     f"[0:a]atrim=start={a}:end={b},asetpts=PTS-STARTPTS[a{n}]")
-    graph = ";".join(parts) + ";" + "".join(f"[v{n}][a{n}]" for n in range(len(ranges))) + f"concat=n={len(ranges)}:v=1:a=1[v][a]"
-    script = out_mp4 + ".filter.txt"
-    write_text(script, graph)
-    tail_args = ["-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                 "-c:a", "aac", "-b:a", "192k", out_mp4]
-    done = subprocess.run(FF + ["-i", recording, "-/filter_complex", script] + tail_args, capture_output=True, text=True)
-    if done.returncode != 0:   # older ffmpeg spells the option differently
-        done = subprocess.run(FF + ["-i", recording, "-filter_complex_script", script] + tail_args, capture_output=True, text=True)
-    os.remove(script)
-    if done.returncode != 0:
-        fail("ffmpeg could not trim the recording: " + done.stderr[-300:])
+    render_pieces(recording, ranges, out_mp4)
     kept = duration(out_mp4)
     write_json(os.path.splitext(out_mp4)[0] + ".words.json", retime(words, ranges))
     log(f"Trimmed {total - kept:.1f}s of dead air ({(total - kept) / total:.0%}): {total:.1f}s -> {kept:.1f}s in {len(ranges)} pieces")
@@ -4810,15 +5340,34 @@ def tighten(recording, out_mp4, whisper="small"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["prepare", "tighten"])
-    ap.add_argument("--recording", required=True)
+    ap.add_argument("action", choices=["prepare", "split", "join", "tighten", "render"])
+    ap.add_argument("--recording")
     ap.add_argument("--slug")
     ap.add_argument("--workspace", default=os.path.join(studio_root(), "workspace"))
     ap.add_argument("--out")
     ap.add_argument("--whisper", default="small")
+    ap.add_argument("--tighten", action="store_true", help="Remove pauses on this PC before handing over to Claude Code")
+    ap.add_argument("--minutes", type=float, default=8.0, help="Length of each part when splitting")
+    ap.add_argument("--video", help="render: the input video")
+    ap.add_argument("--keep", help="render: JSON list of [start, end] ranges to keep")
     a = ap.parse_args()
+    need = {"prepare": "recording", "split": "recording", "tighten": "recording", "join": "slug"}
+    if a.action in need and not getattr(a, need[a.action]):
+        fail(f"--{need[a.action]} is required for {a.action}.")
     if a.action == "prepare":
-        prepare(os.path.abspath(a.recording), a.slug or make_slug(a.recording), os.path.abspath(a.workspace), a.whisper)
+        prepare(os.path.abspath(a.recording), a.slug or make_slug(a.recording), os.path.abspath(a.workspace),
+                a.whisper, a.tighten)
+    elif a.action == "split":
+        split(os.path.abspath(a.recording), a.slug or make_slug(a.recording), os.path.abspath(a.workspace),
+              a.minutes, a.whisper, a.tighten)
+    elif a.action == "join":
+        join(a.slug)
+    elif a.action == "render":
+        if not (a.video and a.keep and a.out):
+            fail("render needs --video, --keep and --out.")
+        ranges = read_keep(a.keep)
+        render_pieces(os.path.abspath(a.video), ranges, os.path.abspath(a.out))
+        log(f"RENDERED: {a.out} ({len(ranges)} pieces, {duration(a.out):.1f}s)")
     else:
         out = a.out or os.path.splitext(a.recording)[0] + ".tight.mp4"
         tighten(os.path.abspath(a.recording), os.path.abspath(out), a.whisper)
@@ -5220,6 +5769,13 @@ def torch_gpu():
     return f"{p.name}, {p.total_memory / 2 ** 30:.1f} GB, torch {torch.__version__}"
 
 
+def video_encoder():
+    from common import encoder
+    kind, _ = encoder()
+    return ("NVENC: video is encoded on the graphics card's encoder chip, leaving the CPU free" if kind == "nvenc"
+            else "CPU (x264). NVENC is not available or not working; set \"encoder\": \"nvenc\" in settings.json to retry")
+
+
 def face_model():
     import cv2
     import numpy as np
@@ -5331,6 +5887,8 @@ def main():
     for m in ("cv2", "diffusers", "fal_client", "googleapiclient", "google_auth_oauthlib"):
         check(m, module(m), required=False)
     check("GPU", torch_gpu, required=False)
+    log("Speed")
+    check("video encoder", video_encoder, required=False)
     log("Faces and speakers")
     check("face detector model", face_model)
     check("active-speaker model (LR-ASD)", speaker_model, required=False)
@@ -5406,6 +5964,15 @@ Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 - Assemble by hand: `python ..\app\assemble.py --clips a.mp4 b.mp4 --voice v.wav --format 9:16 --captions --out output\final.mp4`
 - Self-test: `powershell -File ..\app\Test-PodcastStudio.ps1 [-Full] [-NoGui]` (includes the invisible app smoke test: `PodcastStudio.ps1 -SmokeTest`)
 - Optional cloud clip (off by default): `python ..\app\fal_generate.py --endpoint <fal id> ...`
+
+## Memory (this PC: 16 GB RAM, 4 GB graphics card)
+- Never render cuts with one ffmpeg filter graph of many trim/atrim filters: it ran out of memory on a 10-minute
+  1080p test. Use `python ..\app\recording.py render --video in.mp4 --keep keep.json --out out.mp4`
+  (keep.json = [[start, end], ...] in seconds); it renders one piece at a time.
+- Split recordings longer than about 15 minutes: `recording.py split --recording x.mp4 --slug name --minutes 8`,
+  edit each part, then `recording.py join --slug name`.
+- Only one GPU model at a time: Ollama is unloaded before the voice model, AI stills or lip-sync start.
+- `workspace\settings.json`: `"encoder": "auto|cpu|nvenc"`, `"proxies": true|false`, `"model": "<default model>"`.
 
 ## Rules
 - Only clone voices of people who have consented.
