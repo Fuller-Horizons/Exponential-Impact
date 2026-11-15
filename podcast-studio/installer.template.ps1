@@ -351,6 +351,9 @@ foreach ($name in $binaries.Keys) {
     Ok $name
 }
 foreach ($name in $files.Keys) {
+    if ($name -eq 'CLAUDE.md') {   # also kept in the app folder: every new profile gets a copy
+        [System.IO.File]::WriteAllText((Join-Path $appDir 'CLAUDE.workspace.md'), $files[$name], (New-Object System.Text.UTF8Encoding($true)))
+    }
     $target = if ($name -eq 'CLAUDE.md') { Join-Path $Root 'workspace\CLAUDE.md' } else { Join-Path $appDir $name }
     if ($name -eq 'CLAUDE.md' -and (Test-Path $target)) { Ok 'workspace\CLAUDE.md kept (already exists)'; continue }
     [System.IO.File]::WriteAllText($target, $files[$name], (New-Object System.Text.UTF8Encoding($true)))

@@ -78,6 +78,20 @@ press Upload and confirm. It needs a one-time OAuth "Desktop app" sign-in file f
 Analyze (frames, transcripts), Voice clone (make the reference sample), Assemble (manual edit), and an
 optional fal.ai tab for cloud clips. Claude Code buttons are optional extras.
 
+## Profiles: one per show or persona
+The **Profile** list at the top of the window switches everything that defines a show at once: brand kit
+(colours, font, logo, music bed), style bible, house rules, voice samples, footage library, projects,
+YouTube sign-in, which services are on by default, and the settings new videos start with.
+- **New...** makes a profile, empty or as a copy of the current one's setup.
+- **Save as profile defaults** stores the Create tab's length, shape, framing, model, soundbites, stills,
+  lip-sync, voice sample and episode folder; every new video in that profile starts from them.
+- **Export...** / **Import...** move a profile's setup (not its footage, videos or sign-ins) as one .zip.
+- **Archive...** sets a profile aside; its folder is moved to `profiles\_archived`, never deleted.
+Connections in the Settings tab are shared by every profile, except YouTube, which each profile signs in to.
+The original `workspace` folder is the first profile, "Main"; new profiles live in `profiles\<name>`.
+
+**Simple mode** (top right) shows only Create, Edit recording, Highlights and Publish.
+
 ## Settings tab: connect services once
 Each outside service is connected here, once for the whole app: **Connect**, **Disconnect** and **Check all**.
 Higgsfield and vidIQ are connected on claude.ai (the button opens that page) and checked through Claude Code;

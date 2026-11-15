@@ -31,11 +31,20 @@ CONNECTOR_PAGE = "https://claude.ai/settings/connectors"
 
 
 def workspace():
-    return os.path.join(studio_root(), "workspace")
+    """The profile in use (YouTube sign-in is per profile, so each show can post to its own channel)."""
+    from common import workspace_dir
+    return workspace_dir()
 
 
 def path():
-    return os.path.join(workspace(), "connections.json")
+    """Connections are shared by every profile: they belong to your accounts, not to a show."""
+    from common import shared_dir
+    new = os.path.join(shared_dir(), "connections.json")
+    old = os.path.join(studio_root(), "workspace", "connections.json")
+    if not os.path.exists(new) and os.path.exists(old):      # carry over a check made before profiles existed
+        os.makedirs(shared_dir(), exist_ok=True)
+        shutil.copy2(old, new)
+    return new
 
 
 def load():
@@ -46,8 +55,9 @@ def load():
 
 
 def save(data):
-    os.makedirs(workspace(), exist_ok=True)
-    write_json(path(), data)
+    p = path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    write_json(p, data)
 
 
 def connected(service, data=None):

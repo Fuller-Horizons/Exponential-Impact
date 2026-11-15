@@ -300,7 +300,7 @@ def footage_filter(src_w, src_h, W, H, layout):
 # ------------------------------------------------------------------ 1080p working copies of large footage
 def proxy_dir():
     from common import studio_root
-    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "workspace", "proxies")
+    return os.environ.get("PSTUDIO_PROXIES") or os.path.join(studio_root(), "shared", "proxies")
 
 
 def _proxy_path(src):

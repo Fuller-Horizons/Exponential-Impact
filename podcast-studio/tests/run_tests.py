@@ -985,6 +985,80 @@ def manual_assemble_with_music_and_plain_captions():
 
 
 @test
+def profiles_per_show():
+    import common
+    import connections
+    import profiles
+    reg_file = common.profiles_file()
+    main = common.workspace_dir()
+    assert main == os.path.join(WORK, "workspace") and profiles.registry()["current"] == "Main", "the first profile is the old workspace"
+    # a setup worth copying: brand kit with logo and music, style, rules, voice sample, defaults, a YouTube sign-in
+    os.makedirs(os.path.join(main, "voice"), exist_ok=True)
+    logo, music = os.path.join(WORK, "logo-src.png"), os.path.join(WORK, "bed-src.wav")
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x32", "-frames:v", "1", logo)
+    sh("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=200:d=1", music)
+    json.dump({"accent": "#123456", "logo": logo, "music": music}, open(os.path.join(main, "brand.json"), "w"))
+    open(os.path.join(main, "style-bible.md"), "w").write("# Style\nWarm and direct.")
+    open(os.path.join(main, "house-rules.md"), "w").write("# House rules\n- No greetings.\n")
+    open(os.path.join(main, "voice", "host.wav"), "wb").write(b"RIFF....")
+    json.dump({"name": "Main", "defaults": {"seconds": "30", "format": "16:9"}}, open(os.path.join(main, "profile.json"), "w"))
+    open(os.path.join(main, "youtube_token.json"), "w").write('{"token": "secret"}')
+    try:
+        out = sh(PY, os.path.join(SRC, "profiles.py"), "create", "--name", "Second Show", "--copy-from", "Main", env=ENV)
+        second = profiles.registry()["profiles"]["Second Show"]
+        assert "PROFILE:" in out and common.workspace_dir() == second, "a new profile becomes the one in use"
+        assert os.path.exists(os.path.join(second, "CLAUDE.md")) and os.path.isdir(os.path.join(second, "projects"))
+        brand = json.load(open(os.path.join(second, "brand.json")))
+        assert brand["accent"] == "#123456" and brand["logo"].startswith(os.path.join(second, "assets")), brand
+        assert os.path.exists(brand["logo"]) and os.path.exists(brand["music"]), "logo and music are copied into the profile"
+        assert open(os.path.join(second, "house-rules.md")).read().endswith("- No greetings.\n")
+        assert os.path.exists(os.path.join(second, "voice", "host.wav"))
+        assert not os.path.exists(os.path.join(second, "youtube_token.json")), "sign-ins are never copied"
+        assert json.load(open(os.path.join(second, "profile.json")))["name"] == "Second Show"
+        # each profile keeps its own library, projects and settings; connections stay shared
+        assert not os.listdir(os.path.join(second, "library")) and not os.listdir(os.path.join(second, "projects"))
+        import services
+        assert services.workspace() == second
+        assert connections.path() == os.path.join(WORK, "shared", "connections.json")
+        assert "already exists" in sh(PY, os.path.join(SRC, "profiles.py"), "create", "--name", "Second Show", env=ENV, ok=1)
+        assert "Use 1-40" in sh(PY, os.path.join(SRC, "profiles.py"), "create", "--name", "bad/name", env=ENV, ok=1)
+        # export the setup only, then import it as a third profile
+        zip_path = os.path.join(WORK, "second.zip")
+        sh(PY, os.path.join(SRC, "profiles.py"), "export", "--name", "Second Show", "--out", zip_path, env=ENV)
+        import zipfile
+        names = zipfile.ZipFile(zip_path).namelist()
+        assert "brand.json" in names and "voice/host.wav" in names and any(n.startswith("assets/") for n in names)
+        assert not any("youtube" in n or n.startswith(("projects/", "library/", "episodes/")) for n in names), names
+        sh(PY, os.path.join(SRC, "profiles.py"), "import", "--file", zip_path, env=ENV)
+        reg = profiles.registry()
+        assert "Second Show (2)" in reg["profiles"] and reg["current"] == "Second Show", "importing does not switch"
+        third = reg["profiles"]["Second Show (2)"]
+        brand3 = json.load(open(os.path.join(third, "brand.json")))
+        assert brand3["logo"].startswith(third) and os.path.exists(brand3["logo"])
+        # a zip that tries to write outside its folder is refused
+        evil = os.path.join(WORK, "evil.zip")
+        with zipfile.ZipFile(evil, "w") as z:
+            z.writestr("podcast-studio-profile.json", json.dumps({"name": "Evil"}))
+            z.writestr("../../outside.txt", "x")
+        assert "Unsafe path" in sh(PY, os.path.join(SRC, "profiles.py"), "import", "--file", evil, env=ENV, ok=1)
+        assert not os.path.exists(os.path.join(WORK, "outside.txt"))
+        # archive: never the profile in use, and the folder is moved, not deleted
+        assert "Switch to another profile" in sh(PY, os.path.join(SRC, "profiles.py"), "archive", "--name", "Second Show", env=ENV, ok=1)
+        sh(PY, os.path.join(SRC, "profiles.py"), "archive", "--name", "Second Show (2)", env=ENV)
+        assert "Second Show (2)" not in profiles.registry()["profiles"] and not os.path.exists(third)
+        assert os.listdir(os.path.join(WORK, "profiles", "_archived")), "archived folders are kept"
+        sh(PY, os.path.join(SRC, "profiles.py"), "switch", "--name", "Main", env=ENV)
+        assert common.workspace_dir() == main
+        os.environ["PSTUDIO_WORKSPACE"] = second           # the app sets this when you switch: it wins
+        assert common.workspace_dir() == second
+    finally:
+        os.environ.pop("PSTUDIO_WORKSPACE", None)
+        for f in (reg_file, os.path.join(main, "youtube_token.json"), os.path.join(main, "brand.json")):
+            if os.path.exists(f):
+                os.remove(f)
+
+
+@test
 def guide_ships_offline():
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "guide"))
     import make_guide

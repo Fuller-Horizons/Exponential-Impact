@@ -115,9 +115,29 @@ def studio_root():
     return os.environ.get("PSTUDIO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def profiles_file():
+    return os.path.join(studio_root(), "profiles", "profiles.json")
+
+
+def workspace_dir():
+    """The folder of the profile in use: its projects, footage library, brand kit, style bible, voice samples and
+    settings. PSTUDIO_WORKSPACE (set by the app when you switch profile) wins; then profiles/profiles.json; then the
+    original single workspace folder, which becomes the first profile ("Main")."""
+    if os.environ.get("PSTUDIO_WORKSPACE"):
+        return os.environ["PSTUDIO_WORKSPACE"]
+    reg = read_json(profiles_file(), {}) or {}
+    folder = (reg.get("profiles") or {}).get(reg.get("current") or "")
+    return folder or os.path.join(studio_root(), "workspace")
+
+
+def shared_dir():
+    """Settings shared by every profile on this PC (connections to outside services)."""
+    return os.path.join(studio_root(), "shared")
+
+
 def settings():
-    """workspace/settings.json: user choices such as {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true}."""
-    data = read_json(os.path.join(studio_root(), "workspace", "settings.json"), {}) or {}
+    """The profile's settings.json: {"model": ..., "encoder": "auto|cpu|nvenc", "proxies": true, ...}."""
+    data = read_json(os.path.join(workspace_dir(), "settings.json"), {}) or {}
     return data if isinstance(data, dict) else {}
 
 

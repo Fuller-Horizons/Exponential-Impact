@@ -37,7 +37,8 @@ APP = os.path.dirname(os.path.abspath(__file__))
 
 
 def workspace():
-    return os.path.join(studio_root(), "workspace")
+    from common import workspace_dir
+    return workspace_dir()
 
 
 def defaults():

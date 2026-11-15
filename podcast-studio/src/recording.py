@@ -340,7 +340,7 @@ def main():
     ap.add_argument("action", choices=["prepare", "split", "join", "tighten", "render"])
     ap.add_argument("--recording")
     ap.add_argument("--slug")
-    ap.add_argument("--workspace", default=os.path.join(studio_root(), "workspace"))
+    ap.add_argument("--workspace", default=None, help="Profile folder (default: the profile in use)")
     ap.add_argument("--out")
     ap.add_argument("--whisper", default="small")
     ap.add_argument("--tighten", action="store_true", help="Remove pauses on this PC before handing over to Claude Code")
@@ -348,6 +348,9 @@ def main():
     ap.add_argument("--video", help="render: the input video")
     ap.add_argument("--keep", help="render: JSON list of [start, end] ranges to keep")
     a = ap.parse_args()
+    if not a.workspace:
+        from common import workspace_dir
+        a.workspace = workspace_dir()
     need = {"prepare": "recording", "split": "recording", "tighten": "recording", "join": "slug"}
     if a.action in need and not getattr(a, need[a.action]):
         fail(f"--{need[a.action]} is required for {a.action}.")

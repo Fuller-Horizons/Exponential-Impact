@@ -190,7 +190,8 @@ def main():
         check("LLM JSON reply", llm_test(a.model))
         voice = a.voice
         if not voice:
-            vdir = os.path.join(a.root, "workspace", "voice")
+            from common import workspace_dir
+            vdir = os.path.join(workspace_dir(), "voice")
             wavs = [os.path.join(vdir, f) for f in os.listdir(vdir)] if os.path.isdir(vdir) else []
             voice = next((w for w in wavs if w.lower().endswith(".wav")), None)
         if voice:

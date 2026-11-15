@@ -1,5 +1,8 @@
 # Podcast Studio workspace
 
+This folder is one **profile** (a show or persona). Its brand kit, style bible, house rules, voice samples,
+library and projects belong to this show only; other profiles live in other folders.
+
 Local pipeline that turns a prompt into a short video in the podcast's style.
 Hardware: 4 GB GeForce GPU, 16 GB RAM. The Create flow makes no cloud calls.
 
